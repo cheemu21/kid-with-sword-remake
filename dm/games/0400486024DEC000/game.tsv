@@ -59,3 +59,5 @@ pso_gpu	g19p
 present_snap	on
 # Handheld, as an iPhone runs it: the game presents 1920x1080 instead of 2048x1152 docked
 op_mode	handheld
+# Pool tables give a finalized texture's ID the dummy instead of making its texture again: about 2.5 GB at the house-to-forest change (upstream PR #1393, open)
+pool_skip_retired	on
