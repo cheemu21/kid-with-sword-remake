@@ -48,3 +48,5 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The touch controls' Forest colours: blue A, green B, yellow X / Y, red +, deep green shoulders, bronze D-pad, gold rims, all translucent (DmGamepad.m theme_init)
+pad_theme	forest
