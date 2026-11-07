@@ -371,6 +371,8 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_hid.c` answers it. On Horizon a device is mounted when the npad's connected controller has the handle's style and an actuator on that side; the host reports it mounted when the channel has an output, as `GetVibrationDeviceInfo` reports the device.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.4.1, entering a Sand Kingdom pipe (`main+0x5d3150` asks for each handle of a controller whether any is mounted; GitHub issue #715). No other local game imports it.
 
+SDK 22 also exposes `IsOunceVibrationDeviceMounted`. Ocarina of Time calls this variant when playing an ocarina note, with rumble enabled or disabled. Its SDK implementation opens the same unserved `hid` service and aborts with `0xe15` (`sdk+0x6c9390`, through the public wrapper at `sdk+0x6cd610`). The host answers it through the same channel-output check as `IsVibrationDeviceMounted`, matching upstream commit `8feddfe`. Playing notes after rebuilding was confirmed on the Mac; other games and iOS were not tested ([upstream issue #1433](https://github.com/seedds/nxnative/issues/1433)).
+
 ### Vibration handles before a controller is reported
 
 - **Symptom:** `DM_RUMBLE_LOG=1` shows the game's startup handle request answered with none, then every vibration value sent to handle 0 and reaching no output for the whole session, although a controller with haptics (a DualSense on the Mac) is connected. A game that rumbles would stay silent.

@@ -1,5 +1,7 @@
 # The Legend of Zelda: Ocarina of Time
 
+Playing an ocarina note aborted with `0xe15` even with rumble disabled. The missing SDK 22 `IsOunceVibrationDeviceMounted` hook is now answered as in upstream `8feddfe`; playing notes after rebuilding was confirmed on the Mac. See [Whether a vibration device is mounted](../../../docs/reference/services.md#whether-a-vibration-device-is-mounted) for the cause and fix.
+
 The Switch 2 base dump reaches its title screen on the Mac. VideoToolbox decodes the 1920×1080 AV1 track. The movie library runs its NDVE compute shaders to produce the background behind the logo and menu. Gameplay validation is open.
 
 ## Profile
