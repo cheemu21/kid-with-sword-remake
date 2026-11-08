@@ -48,6 +48,11 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The fork's steady 30 fps (V17): at 30 fps an iPhone lowers the GPU clock until the work fills most of the frame (log 60: 195 of 300 frames over 33.3 ms, 109 payback steps in 40 s).
+# the display link's frame latency 2 at the 30 fps cap: 66 ms from submission to display instead of 33, so a 34-38 ms frame is absorbed while the mean fits
+link_latency30	2
+# no payback: a late frame's lost time is let go (the game slows by it, as on the console) instead of a step of 3 vsyncs shown for 2, a half-frame jump in motion on the next frame
+fps_payback	off
 # The touch controls' Forest colours: blue A, green B, yellow X / Y, red +, deep green shoulders, bronze D-pad, gold rims, all translucent (DmGamepad.m theme_init)
 pad_theme	forest
 # FF (the kid-with-sword-remake fork's experimental iPhone build of nxnative main): the iPhone's settings from the fork's X line.
