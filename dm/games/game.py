@@ -190,7 +190,7 @@ def header_one(g):
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
     if pl not in ('simple', 'full', 'touch', 'native'): sys.exit(f'{g.id}: pad_layout must be simple, full, touch or native: {pl}')   # touch = Tap (no control: every touch goes to the game's touch screen); native = a mobile-game layout in glass (a floating left stick, the camera on the right half, icon keys with the button's letter)
-    amo = g.get('amiibo_overlay', 'off')   # the launcher's Amiibo rows (DM_AMIIBO_LIMIT, DM_AMIIBO_DROPS; hle_fs.c rom_overlay_set): on when the app's romfs_overlay has the amiibo-* folders (scripts/oot_amiibo_overlay.py)
+    amo = g.get('amiibo_overlay', 'off')   # the amiibo overlay (DM_AMIIBO picker list; hle_fs.c rom_overlay_set loads amiibo-nolimit/ always): on when the app's romfs_overlay has the amiibo-* folders (scripts/oot_amiibo_overlay.py)
     if amo not in ('off', 'on'): sys.exit(f'{g.id}: amiibo_overlay must be off or on: {amo}')
     pth = g.get('pad_theme', 'classic')   # the virtual gamepad's colours (DmGamepad.m theme_init; the launcher's Touch controls style, DM_PAD_THEME, overrides): classic = translucent white, forest = the N64-and-woods palette
     if pth not in ('classic', 'forest'): sys.exit(f'{g.id}: pad_theme must be classic or forest: {pth}')
