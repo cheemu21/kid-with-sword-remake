@@ -195,8 +195,13 @@ static void rom_overlay_set(char *dst, size_t n, const char *env) {
     // tier 2 that hle_oe.c answers for Potato: 960x540 into a 1280x720 frame, against Normal's 1280x720 into 1920x1080), for a steadier frame rate on a hot phone; 0 (Normal,
     // the default) or a folder without it keeps <mode>/
     const char *pe = getenv("DM_RES_PRESET"); int potato = pe && (atoi(pe) == 1 || !strcmp(pe, "potato"));
+    // amiibo-nolimit/ first where a folder has it: Ocarina of Time's Game/AmiiboSetting with every amiibo's daily limit off, and the size table entry it needs (scripts/oot_amiibo_overlay.py)
+    const char *avar = "amiibo-nolimit";
     for (char *root = strtok_r(roots, ":", &save); root; root = strtok_r(NULL, ":", &save)) {
-        char sub[1100]; struct stat st; snprintf(sub, sizeof sub, "%s/potato-%s", root, mode);
+        char sub[1100]; struct stat st;
+        { snprintf(sub, sizeof sub, "%s/%s", root, avar);
+            if (!stat(sub, &st) && S_ISDIR(st.st_mode)) { if (dst[0]) strlcat(dst, ":", n); strlcat(dst, sub, n); LOG("fs rom overlay: %s (amiibo: daily limit off)", sub); } }
+        snprintf(sub, sizeof sub, "%s/potato-%s", root, mode);
         if (!potato || stat(sub, &st) || !S_ISDIR(st.st_mode)) snprintf(sub, sizeof sub, "%s/%s", root, mode);
         if (!stat(sub, &st) && S_ISDIR(st.st_mode)) { if (dst[0]) strlcat(dst, ":", n); strlcat(dst, sub, n); LOG("fs rom overlay: %s for the %s mode%s", sub, mode, potato ? " (resolution preset Potato)" : ""); }
         if (dst[0]) strlcat(dst, ":", n); strlcat(dst, root, n);
