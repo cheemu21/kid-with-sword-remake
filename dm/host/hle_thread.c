@@ -911,6 +911,7 @@ void dm_yield_top(char *out, size_t n) {
 }
 // CPU time of the guest threads since the last call, by Switch priority band (<= 44: the main thread's level and above; 45-59; >= 60) and the three busiest threads with their priority.
 // For the power line (hle_nvn.c power_line): it shows which threads a priority-to-QoS mapping would move and how much CPU they use. secs = the window length
+double dm_guest_cpu_ms_s;   // the guest threads' CPU of the window dm_thread_cpu last reported, all priorities (hle_nvn.c power_line: the host threads' share is the process's minus this)
 void dm_thread_cpu(char *out, size_t n, double secs) {
     thr_t *top[3] = {0}; double d[3] = {0}, band[3] = {0};
     pthread_mutex_lock(&G);
@@ -923,6 +924,7 @@ void dm_thread_cpu(char *out, size_t n, double secs) {
         band[t->prio <= 44 ? 0 : t->prio < 60 ? 1 : 2] += ms;
         for (int i = 0; i < 3; i++) if (ms > d[i]) { for (int j = 2; j > i; j--) { top[j] = top[j - 1]; d[j] = d[j - 1]; } top[i] = t; d[i] = ms; break; }
     }
+    dm_guest_cpu_ms_s = band[0] + band[1] + band[2];
     size_t o = (size_t)snprintf(out, n, "by guest priority ≤44 %.0f / 45–59 %.0f / ≥60 %.0f ms/s; top: ", band[0], band[1], band[2]); char nb[32];
     for (int i = 0; i < 3 && top[i] && o < n; i++)
         o += (size_t)snprintf(out + o, n - o, "%s%#x '%s' priority %d %.0f ms/s%s", i ? ", " : "", top[i]->handle, thr_name(top[i], nb, sizeof nb), top[i]->prio, d[i], top[i]->host_owned ? " (host-created)" : "");
