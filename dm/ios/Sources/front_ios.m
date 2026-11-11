@@ -146,6 +146,18 @@ static void launcher_done(void) { [g_root startGame]; }
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {
     if (self.game) return;
+    // kid-with-sword-remake A12: the Performance profile row (DM_PERF_PROFILE, dm/games/settings.tsv) stands for several rows at once and overrides them here, after the launcher
+    // (either one: Launcher.swift, or the Windows driver's Launcher.m) has put its rows into the environment and before anything of the game reads them; 0 (Custom) or no row
+    // leaves them as set. Measured on an iPhone 16 Pro Max (8 GB) with Ocarina of Time, 2026-11-10: the game's lighter mode (DM_RES_PRESET=1, 960x540) takes the GPU frame from
+    // 23-30 ms to about 17.5, frame generation costs 4.5 ms there against 12 at 1080p, and a native 60 holds 54-57 fps standing and 33 in a camera turn towards the village
+    { static const char *const prof[][10] = {
+          {"DM_FPS_TARGET", "30", "DM_RES_PRESET", "0", "DM_FRAMEGEN", "0", "DM_RENDER_SCALE", "0.5", "DM_PRESET", "potato"},   // 1  30 fps stable
+          {"DM_FPS_TARGET", "30", "DM_RES_PRESET", "1", "DM_FRAMEGEN", "0", "DM_RENDER_SCALE", "0.5", "DM_PRESET", "potato"},   // 2  30 fps light
+          {"DM_FPS_TARGET", "30", "DM_RES_PRESET", "1", "DM_FRAMEGEN", "1", "DM_RENDER_SCALE", "0.5", "DM_PRESET", "potato"},   // 3  30 light + 60 shown
+          {"DM_FPS_TARGET", "60", "DM_RES_PRESET", "1", "DM_FRAMEGEN", "0", "DM_RENDER_SCALE", "0.5", "DM_PRESET", "potato"} }; // 4  60 fps light
+      const char *pp = getenv("DM_PERF_PROFILE"); int pi = pp ? atoi(pp) : 0;
+      if (pi >= 1 && pi <= 4) { for (int i = 0; i < 10; i += 2) setenv(prof[pi - 1][i], prof[pi - 1][i + 1], 1);
+          LOG("front end: performance profile %d: frame rate %s, resolution preset %s, frame generation %s, render scale %s", pi, prof[pi - 1][1], prof[pi - 1][3], prof[pi - 1][5], prof[pi - 1][7]); } }
     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
@@ -205,7 +217,7 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
         CGFloat u = layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3);
-        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
+        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 124, 22);   // 124: the rate, the host threads' CPU and the thermal mark ("30 fps · 23 T2")
     }
 }
 - (void)showFPS:(BOOL)on {   // the frame-rate counter: DM_SHOW_FPS at Play, then the in-game menu
@@ -329,7 +341,16 @@ static UILabel *front_ios_fps_label(void) {
     __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
-        if (now - t0 < 1.5) l.text = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];   // a longer span is the time in the background: no reading
+        // kid-with-sword-remake A11: beside the rate, the host threads' CPU of the last 300 frames as a percentage of a core (hle_nvn.c power_line), and the counter's colour by it:
+        // which of the two states this launch fell into, read standing still some 15 s after a save has loaded. Green under 30: the state that stays smooth; red from 38: the one whose
+        // camera turns stall, where closing the game and opening it again is the way out (Ocarina of Time on an 8 GB iPhone: 21-28 against 42-56)
+        // A12: the colour goes by the lowest of the last three windows (dm_host_cpu_floor), so a turn towards a new area, which raises the figure for one window, no longer
+        // turns a smooth launch red; and "T2" / "T3" follows while iOS reports a serious or critical thermal state, where it holds the CPU near half a watt and the frame rate
+        // falls whatever the launch's state (a played session at thermal 2: 0.45-0.64 W and 21-28 fps)
+        int dm_host_cpu_ms_s(void), dm_host_cpu_floor(void), dm_thermal_now(void); int h = dm_host_cpu_ms_s(), lo = dm_host_cpu_floor(), th = dm_thermal_now();
+        NSString *hot = th >= 2 ? [NSString stringWithFormat:@" T%d", th] : @"";
+        if (now - t0 < 1.5) l.text = h > 0 ? [NSString stringWithFormat:@"%.0f fps · %d%@", (n - n0) / (now - t0), (h + 5) / 10, hot] : [NSString stringWithFormat:@"%.0f fps%@", (n - n0) / (now - t0), hot];   // a longer span is the time in the background: no reading
+        l.textColor = lo <= 0 ? UIColor.whiteColor : lo < 300 ? [UIColor colorWithRed:0.45 green:1.0 blue:0.45 alpha:1] : lo < 380 ? [UIColor colorWithRed:1.0 green:0.9 blue:0.3 alpha:1] : [UIColor colorWithRed:1.0 green:0.4 blue:0.35 alpha:1];
         n0 = n; t0 = now;
     }];
     LOG("front end: frame-rate counter on");

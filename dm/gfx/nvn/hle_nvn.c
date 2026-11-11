@@ -1603,6 +1603,12 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
+static _Atomic int g_host_cpu_ms_s, g_host_cpu_floor;   // 0 until the first window is in; the floor: the lowest of the last three windows
+int dm_host_cpu_ms_s(void) { return atomic_load(&g_host_cpu_ms_s); }
+// The launch's state rather than the moment's: the state that stalls holds its high figure in every window, while a camera turn towards a new area raises a smooth launch's
+// for one window (505 ms/s in the window that brought in the village, 216-295 around it)
+int dm_host_cpu_floor(void) { return atomic_load(&g_host_cpu_floor); }
+int dm_thermal_state(void) { return dm_thermal_now(); }
 static void power_line(uint64_t frame) {
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
@@ -1646,7 +1652,14 @@ static void power_line(uint64_t frame) {
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
-        LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
+        LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc);
+        // kid-with-sword-remake A11: the host threads' CPU (the process's minus the guest threads'), the one figure that told the two states a launch falls into apart in every
+        // run measured on an iPhone 16 Pro Max (Ocarina of Time standing in Kokiri Forest at 30 fps: 211-279 ms/s in the state whose camera turns stay smooth, 415-556 in the
+        // one that stalls). The frame-rate counter shows it as a percentage of a core, coloured (front_ios.m)
+        { extern double dm_guest_cpu_ms_s; double host = (cpu - pcpu) / 1e6 / s - dm_guest_cpu_ms_s; if (host < 1) host = 1;
+          atomic_store(&g_host_cpu_ms_s, (int)(host + 0.5));
+          { static int last[3], nl; last[nl++ % 3] = (int)(host + 0.5); int lo = last[0]; for (int i = 1; i < 3 && i < nl; i++) if (last[i] < lo) lo = last[i]; atomic_store(&g_host_cpu_floor, lo); }
+          LOG("[nvn] host threads up to frame %llu: CPU %.0f ms/s (the process's %.0f minus the guest threads' %.0f)", frame, host, (cpu - pcpu) / 1e6 / s, dm_guest_cpu_ms_s); } }
     else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes();
 }

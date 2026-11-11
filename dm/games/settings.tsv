@@ -14,6 +14,7 @@
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
 #   meta      optional, key=value pairs separated by ; (settings.py META lists the keys; docs/frontends.md, The settings list, describes them):
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
+DM_PERF_PROFILE	choice	0=Custom,1=30 fps stable,2=30 fps light,3=30 light + 60 shown,4=60 fps light	0	platform:ios	Game	Performance profile	Sets frame rate, resolution, render scale and frame generation together and overrides those rows; Custom uses the rows as set. Light is the game's 960×540 mode: less sharp, and the GPU has room to spare. 60 shown draws 30 and lets MetalFX make the frames between. 60 fps light gives what the phone can reach, not a steady 60, and the game slows down below it.	level=basic
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_FRAMEGEN	toggle	-	0	gfxapi:nvn	Game	Frame generation	Shows 60 frames a second while the game draws 30: MetalFX makes a frame between each two. Less work and heat than 60 fps, with more input delay than real 60; fast motion can smear.	needs=DM_FPS_TARGET=30
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Adjusts resolution between 70% and 100% under load. Turn off to keep full resolution for the selected console mode.
