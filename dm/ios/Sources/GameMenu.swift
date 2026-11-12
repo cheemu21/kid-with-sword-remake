@@ -39,11 +39,11 @@ private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
     func pick(_ v: String) { m.choose(s, v); _ = dm_setting_live(s.env, v) }
     if s.kind == "toggle" {
         let a = UIAction(title: s.label, attributes: attributes, state: now == s.onValue ? .on : .off) { _ in pick(now == s.onValue ? s.offValue : s.onValue) }
-        if fixed { a.subtitle = "Set in env.txt" }
+        if fixed { a.subtitle = "Set at launch" }
         return a
     }
     let options = s.options ?? []
     let current = options.first { $0[0] == now }?[1] ?? now
     let actions = options.map { o in UIAction(title: o[1], attributes: attributes, state: o[0] == now ? .on : .off) { _ in pick(o[0]) } }
-    return UIMenu(title: s.label, subtitle: fixed ? "\(current), set in env.txt" : nil, options: .singleSelection, children: actions)
+    return UIMenu(title: s.label, subtitle: fixed ? "\(current), set at launch" : nil, options: .singleSelection, children: actions)
 }

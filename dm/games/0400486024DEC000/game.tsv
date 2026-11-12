@@ -66,3 +66,6 @@ present_snap	on
 op_mode	handheld
 # Pool tables give a finalized texture's ID the dummy instead of making its texture again: about 2.5 GB at the house-to-forest change (upstream PR #1393, open)
 pool_skip_retired	on
+# The Render scale slider (the fork's V15-touch2): a fixed fraction of the game's base size, from 0.25 (480x270 handheld, marked Potato) to 1.0 (1920x1080); the render-scale stub (patches.py) fixes every value up to 1.0
+render_scale	0.25:1.0:0.05
+render_scale_marks	0.25=Potato

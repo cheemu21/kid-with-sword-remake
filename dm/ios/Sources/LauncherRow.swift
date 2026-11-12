@@ -1,5 +1,5 @@
 // One launcher setting as a row (a menu, a slider with its percentage, a toggle), shared by the iOS launcher (Launcher.swift) and the Mac app's settings window (dm/mac/Launcher.swift).
-// A row whose setting is fixed by an env file or by the launch environment is shown but disabled.
+// A row whose setting is fixed by the launch environment is shown but disabled; one an env file set starts at that value and can still be changed.
 import SwiftUI
 
 extension LauncherModel {

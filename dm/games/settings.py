@@ -113,6 +113,20 @@ def build(gid, patched, control):
         if not shown(cond, n): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
+        if var == 'DM_RENDER_SCALE':   # a game's own slider (game.tsv render_scale min:max:step, render_scale_default, render_scale_marks value=label,...)
+            rr, rd, rm = g.get('render_scale', ''), g.get('render_scale_default', ''), g.get('render_scale_marks', '')
+            if rr:
+                try: lo, hi, st = (float(x) for x in rr.split(':'))
+                except ValueError: sys.exit(f'{g.id}: render_scale is <min>:<max>:<step>: {rr}')
+                if not (0.25 <= lo < hi <= 1.0 and 0 < st <= hi - lo): sys.exit(f'{g.id}: render_scale must lie within 0.25:1.0 with a step that fits: {rr}')
+                values = rr
+            if rd: s['default'] = rd
+            if rm:
+                marks = [m.split('=', 1) for m in rm.split(',')]
+                if any(len(m) != 2 or not m[1] for m in marks): sys.exit(f'{g.id}: render_scale_marks is value=label,...: {rm}')
+                try: [float(m[0]) for m in marks]
+                except ValueError: sys.exit(f'{g.id}: render_scale_marks values are numbers: {rm}')
+                s['marks'] = marks
         if kind == 'choice':
             opts = [list(l) for l in langs] if values == 'languages' else [v.split('?', 1)[0].split('=', 1) for v in values.split(',') if offered(v, n)]
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
