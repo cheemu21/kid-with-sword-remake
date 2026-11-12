@@ -376,7 +376,8 @@ This fork runs on [nxnative](https://github.com/seedds/nxnative) and the project
 - **seedds**: nxnative itself, and the Ocarina of Time fixes taken from it:
   - shader translation: LDSM fences, raw global memory lookups, invariant mesh positions, extended multiplies;
   - render-target recycling, texture IDs marked gone with their pool, and textures of a resolution family made uncompressed;
-  - audio renderers on their own PCM blocks, Core Haptics stops survived, and growing write lists.
+  - audio renderers on their own PCM blocks, Core Haptics stops survived, and growing write lists;
+  - the current nxnative main the FF builds start from, and the CPU savers in X14 and FF: the uniform copy thread's hand-off, and pipeline bases the archives lack remembered for the run.
 - **ChiefSZ13**: the Ocarina of Time profile and bring-up (title screen, Kokiri Forest, bindless pool tables patched instead of rebuilt).
 - **Pedro Nascimento (lunks)**:
   - Ampere F2IP and task shader payloads, float add atomics, NDSR packs read entry by entry, and the raw global memory pool table;
@@ -396,6 +397,8 @@ This fork runs on [nxnative](https://github.com/seedds/nxnative) and the project
 - **David Padron-Harris**: growing write lists.
 - **zatteogit**: one of the nxnative fixes in X1.
 - **tut**: lazy textures for pool walks.
+- **David Lepe**: the GPU memory fix at a scene change (pool tables give a finalized texture's ID the dummy instead of making its texture again: `pool_skip_retired`), and raw global memory's pool table listing only the pools the game took a buffer address in.
+- **a contributor who signed only as "contributor"**: the game's compute dispatches with no barrier between them run side by side (`dispatch_overlap`), about 2 ms less a frame in Kokiri Forest on a Mac.
 - **the author of the oot2 branch**: occlusion conditions read once landed, shared-memory byte stores, and raw reads that keep their pool range.
 - **NotRexed's [Hookshot](https://github.com/NotRexed/Hookshot)**: the idea of frame generation for this game. No code was taken (Hookshot is GPL-3.0).
 - **Apple's MetalFX**: the frame interpolator and the scalers.

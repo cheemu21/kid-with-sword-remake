@@ -23,11 +23,11 @@ This project is built on other people's work ([licenses](dm/third_party/README.m
 - **[Hookshot](https://github.com/NotRexed/Hookshot)** by NotRexed: the idea of frame generation for Ocarina of Time. No code was taken (Hookshot is GPL-3.0).
 
 This fork's Ocarina of Time builds also carry work by these people ([what each made](docs/games/kid-with-sword-remake.md#credits)):
-- **seedds** (nxnative itself);
+- **seedds** (nxnative itself, and the current nxnative main the FF builds start from);
 - **ChiefSZ13** (the game's profile and bring-up);
-- **Pedro Nascimento (lunks)**, **Xipzer**, **nanotchec**, **Adrian Smith**, **Romen Adama Caetano Ramírez**, **Travis (travislikestocode)**;
+- **Pedro Nascimento (lunks)**, **Xipzer**, **nanotchec**, **Adrian Smith**, **Romen Adama Caetano Ramírez**, **Travis (travislikestocode)**, **David Lepe**;
 - **vladbondarenko97**, **uncraftablexd**, **mmkzer0**, **Nimesh Ambepitiya**, **MetaIX**, **TheGoldfish11**, **Oliver Ames**, **David Padron-Harris**, **zatteogit**, **tut**;
-- the author of the oot2 branch.
+- the author of the oot2 branch, and a contributor who signed only as "contributor".
 
 ## How to play
 
