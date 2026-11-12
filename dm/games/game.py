@@ -102,7 +102,7 @@ def by_build(main_id):   # the profile whose build rows register this main build
 
 
 # agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
-UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+UPSCALER_SOURCE = re.compile(r'/agl_ndsr(_vr(_light)?)?\.pck#')   # Ocarina of Time's are the _vr / _vr_light packs
 
 
 def upscaler_keys(g):
@@ -214,6 +214,10 @@ def header_one(g):
     ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
+    upc = g.get('upscaler_chain', '')   # <stage>,<stage>...><last>: an upscaler that is a chain of shaders (16-digit keys); with DM_UPSCALER=metalfx the stages before the last are skipped and MetalFX scales the first stage's input into the last's image (nvn_mtl.m up_chain)
+    if upc and not re.fullmatch(r'[0-9a-f]{16}(,[0-9a-f]{16})*>[0-9a-f]{16}(\|[0-9a-f]{16})*', upc): sys.exit(f'{g.id}: upscaler_chain takes <key>,<key>...><key>[|<key>...] (the last stage, or any of several): {upc}')
+    dov = g.get('dispatch_overlap', 'off')   # the game's dispatches with no barrier of its between them run side by side in the copy encoder (nvn_mtl.m dispatch_enc; DM_NVN_DISPATCH_OVERLAP overrides): on / off
+    if dov not in ('on', 'off'): sys.exit(f'{g.id}: dispatch_overlap must be on or off: {dov}')
     om = g.get('op_mode', 'console')   # the operation mode reported at start (hle_oe.c dm_opmode; DM_OPMODE overrides): console = docked, handheld = touch screen in use (Super Mario Galaxy's pointer)
     if om not in ('console', 'handheld'): sys.exit(f'{g.id}: op_mode must be console or handheld: {om}')
     if pl == 'touch' and om != 'handheld': sys.exit(f'{g.id}: pad_layout touch needs op_mode handheld (the touch screen reaches the game only in handheld mode)')
@@ -272,6 +276,8 @@ def header_one(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
+         f'#define DM_GAME_UPSCALER_CHAIN "{upc}"',
+         f'#define DM_GAME_DISPATCH_OVERLAP {int(dov == "on")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)

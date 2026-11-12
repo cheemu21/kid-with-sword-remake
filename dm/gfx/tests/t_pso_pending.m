@@ -353,6 +353,29 @@ static void test_prediction_restores_scissor(void) {
     g_exec_next = NULL;
 }
 
+// A table whose every slot holds a build not finished refuses a demanded build; the refusal is remembered for PSO_REFUSED_RETRY_NS (the draws keep their stand-in without
+// a lookup: pso_refused_recent), forgotten after it, and a slot that frees takes the demand again
+static void test_refused_demand_backoff(void) {
+    reset_queue(); nvn_hm_clear(&g_pp_refused, NULL);
+    pthread_mutex_lock(&g_pp_mu);
+    for (int i = 0; i < PSO_PEND_MAX; i++) { g_pp[i].k = make_key((unsigned)(i % 900)); g_pp[i].k.samples = 1 + (unsigned)(i / 900); g_pp[i].k.chmask = (uint32_t)i;
+        g_pp[i].used = 1; g_pp[i].done = 0; g_pp[i].run = 1; g_pp[i].demand = 1; g_pp[i].order = (uint64_t)i + 1; }
+    pthread_mutex_unlock(&g_pp_mu);
+    pso_key k = make_key(1000 % 1024); k.chmask = 0xabcdu; pso_key other = make_key(1001 % 1024); other.chmask = 0xabceu;
+    EXPECT_EQ("a full table of unfinished builds refuses a demanded build", 0, pso_pend_demand(&k, test_vs, test_fs));
+    EXPECT_EQ("nothing remembered before the refusal is noted", 0, pso_refused_recent(&k));
+    uint64_t n0 = g_pp_refused_n; pso_refused_note(&k);
+    EXPECT_EQ("the refusal is counted", n0 + 1, g_pp_refused_n);
+    EXPECT_EQ("a key refused a moment ago is not looked up again", 1, pso_refused_recent(&k));
+    EXPECT_EQ("another key is not taken as refused", 0, pso_refused_recent(&other));
+    nvn_hm_put(&g_pp_refused, &k, (void *)(uintptr_t)((bp_now() - PSO_REFUSED_RETRY_NS - 1000000) | 1));
+    EXPECT_EQ("a refusal older than the retry time is forgotten", 0, pso_refused_recent(&k));
+    EXPECT_TRUE("and its entry removed", nvn_hm_get(&g_pp_refused, &k) == NULL);
+    pthread_mutex_lock(&g_pp_mu); g_pp[7].done = 1; g_pp[7].run = 0; uint32_t gen = 0; int slot = pso_pend_slot(&k, 0, &gen); pthread_mutex_unlock(&g_pp_mu);
+    EXPECT_EQ("a finished slot takes the demand again", 7, slot);
+    reset_queue(); nvn_hm_clear(&g_pp_refused, NULL);
+}
+
 int main(void) {
     @autoreleasepool {
         setvbuf(stdout, NULL, _IONBF, 0);
@@ -362,6 +385,7 @@ int main(void) {
         test_full_table_reclaims_done_not_running();
         test_nil_prediction_falls_back_then_predicts();
         test_prediction_restores_scissor();
+        test_refused_demand_backoff();
         printf("== %d PSO pending checks, %d failed ==\n", g_checks, g_failed);
         return g_failed != 0;
     }

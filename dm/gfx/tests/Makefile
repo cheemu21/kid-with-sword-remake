@@ -635,3 +635,13 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+t_pso_unwrap: t_pso_unwrap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_unwrap.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_unwrap
+check_t_pso_unwrap: t_pso_unwrap
+	./t_pso_unwrap
+# The game's dispatches side by side in the copy encoder where no barrier of its and nothing else lies between them (dispatch_enc, DM_NVN_DISPATCH_OVERLAP)
+t_dispatch_overlap: t_dispatch_overlap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_overlap.m $(MTL_T_SRC) $(FW)
+check_t_dispatch_overlap: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -171,6 +171,34 @@ def plan(lib_dir, chain, pairs, zero):
     return bases, rest, left
 
 
+def read_layouts(lib_dir, paths, known=()):
+    """The bases with a vertex layout of pso_layouts.tsv (pso_capture.py: the prewarm lists' render pipelines need them, the pair bases have none), [(vertex library, entry, pixel
+    library, entry, members JSON)], each once and none already in known; and counts of the rows left out: a library or entry these libraries lack (another chain), or a function
+    with a constant the host does not set (HOST_CONSTANTS). Missing files give none"""
+    lib_dir = romfs.Path(lib_dir); fns, out, seen = {}, [], set(known)
+    left = dict.fromkeys(('library', 'entry', 'function constants', 'malformed'), 0)
+    def fn(lib):
+        if lib not in fns:
+            try: fns[lib] = constants(lib_dir / f'{lib}.metallib')
+            except (OSError, ValueError): fns[lib] = None
+        return fns[lib]
+    for path in paths or ():
+        if not path or not Path(path).is_file(): continue
+        for line in Path(path).read_text(encoding='utf-8').split('\n'):
+            if not line or line.startswith('#'): continue
+            c = line.split('\t')
+            if len(c) != 5: left['malformed'] += 1; continue
+            try: json.loads(c[4])
+            except ValueError: left['malformed'] += 1; continue
+            vf, ff = fn(c[0]), fn(c[2])
+            if vf is None or ff is None: left['library'] += 1; continue
+            if c[1] not in vf or c[3] not in ff: left['entry'] += 1; continue
+            if any(k not in HOST_CONSTANTS for k in vf[c[1]] + ff[c[3]]): left['function constants'] += 1; continue
+            b = tuple(c)
+            if b not in seen: seen.add(b); out.append(b)
+    return out, left
+
+
 def plan_compute(lib_dir, chain, shaders):
     """The compute pipelines the archive holds, [(library, entry)]: each of shaders (<key>_b) with its reflection's entry; and counts of
     the shaders left out as the host would not find their pipeline (reflection, library, entry point, function constants)"""
@@ -202,7 +230,7 @@ def cut_name(lib, entry): return f'{lib}@{entry}'
 
 def cut_entries(lib_dir, bases, computes=()):
     """The functions script specializes from a library of their own (needs_cut): {(library, entry)}"""
-    want, found = {(lib, e) for vl, ve, fl, fe in bases for lib, e in ((vl, ve), (fl, fe))} | set(computes), set()
+    want, found = {(lib, e) for b in bases for lib, e in ((b[0], b[1]), (b[2], b[3]))} | set(computes), set()
     declared = {}
     for lib, entry in want:
         if lib not in declared:
@@ -233,9 +261,10 @@ def script(lib_dir, bases, computes=()):
                             'constant_values': [{'id_type': 'FunctionConstantIndex', 'id': {'data': i}, 'value_type': 'ConstantBool', 'value': {'data': v}}
                                                 for i, v in sorted(HOST_CONSTANTS[c] for c in cs if c in HOST_CONSTANTS)]}
         return f'fnd:{label}.host'
-    for vl, ve, fl, fe in bases:
+    for b in bases:   # a base with a vertex layout (read_layouts) has a fifth member: the descriptor's other members, as the host made them
+        vl, ve, fl, fe = b[:4]
         pipes.append({'vertex_function_descriptor': fd(vl, ve), 'fragment_function_descriptor': fd(fl, fe),
-                      'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)]})
+                      'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)], **(json.loads(b[4]) if len(b) > 4 else {})})
     descriptors = {'render_pipeline_descriptors': pipes}
     if computes: descriptors['compute_pipeline_descriptors'] = [{'compute_function_descriptor': fd(lib, entry)} for lib, entry in computes]   # none: the script of bases alone, as before
     functions_ = {'library_function_descriptors': list(fns.values())}
@@ -255,7 +284,7 @@ def write_script(path, configuration):
 def library_digest(lib_dir, bases, computes=()):
     """The bytes metal-tt consumes: a profile/chain stamp does not change when the same shaders are rebuilt by another Metal compiler."""
     h = hashlib.sha256()
-    for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes}):
+    for name in sorted({lib for b in bases for lib in (b[0], b[2])} | {lib for lib, _ in computes}):
         h.update(name.encode() + b'\0')
         lib = hashlib.sha256()
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f:
@@ -397,7 +426,7 @@ def real_libraries(lib_dir, bases, work, computes=()):
     folder = os.path.isdir(lib_dir)
     if folder and not cuts: return lib_dir
     real = Path(work) / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
-    for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes}):
+    for name in sorted({lib for b in bases for lib in (b[0], b[2])} | {lib for lib, _ in computes}):
         if folder: (real / f'{name}.metallib').symlink_to(Path(lib_dir).resolve() / f'{name}.metallib'); continue
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f, open(real / f'{name}.metallib', 'wb') as o: shutil.copyfileobj(f, o)
     for lib, entry in sorted(cuts):   # a function specialized from a library of its own (needs_cut)
@@ -488,6 +517,7 @@ def main(argv=None):
     ap.add_argument('--shader-map', action='append', help='shader_map.tsv: its compute shaders get pipelines (default: the profile\'s)')
     ap.add_argument('--manifest', action='append', help='pso_manifest.tsv: its C rows first (default: the profile\'s)')
     ap.add_argument('--no-compute', action='store_true', help='no compute pipelines, the bases alone')
+    ap.add_argument('--layouts', action='append', help='pso_layouts.tsv: bases with a vertex layout (pso_capture.py), after the pair bases (default: the profile\'s, when it has one)')
     ap.add_argument('--jobs', type=int, default=JOBS, help=f'metal-tt runs at a time for the compute pipelines (default {JOBS}, half the logical CPUs)')
     a = ap.parse_args(argv)
     if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
@@ -496,6 +526,7 @@ def main(argv=None):
         g = game.load(a.game)
         a.pairs = a.pairs or [str(g.table('shader_pairs.tsv')), str(g.table('pso_pairs.tsv'))]
         a.shader_map = a.shader_map or [str(g.table('shader_map.tsv'))]; a.manifest = a.manifest or [str(g.table('pso_manifest.tsv'))]
+        a.layouts = a.layouts or [str(g.table('pso_layouts.tsv'))]
         a.depth = a.depth or g.get('depth_mode', 'gl')
         if a.depth not in ('gl', 'zero'): sys.exit(f'[RED] pso_offline: {g.id}: depth_mode must be gl or zero: {a.depth}')
     if not a.pairs: sys.exit('[RED] pso_offline: no pair lists (--pairs or --game)')
@@ -510,6 +541,8 @@ def main(argv=None):
     t0 = time.time()
     pairs = read_pairs(text)
     bases, rest, left = plan(lib_dir, chain, pairs, zero)
+    layouts, lleft = read_layouts(lib_dir, a.layouts, bases)
+    bases = bases + layouts   # after the pair bases: their groups (groups_of) stay as they were, and a cached archive group is reused
     shaders = [] if a.no_compute else read_computes(a.shader_map, a.manifest)
     computes, cleft = plan_compute(lib_dir, chain, shaders)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
@@ -519,6 +552,7 @@ def main(argv=None):
     st = stamp(chain, zero, text)
     print(f'pso_offline: {len(pairs)} pairs: {len(bases)} bases, {len(rest)} left to the device (function constants), left out as the host leaves them: '
           + ', '.join(f'{k} {v}' for k, v in left.items()) + f' ({time.time() - t0:.1f} s)')
+    if layouts or any(lleft.values()): print(f'pso_offline: {len(layouts)} bases with a vertex layout (pso_layouts.tsv), left out: ' + ', '.join(f'{k} {v}' for k, v in lleft.items()))
     if shaders: print(f'pso_offline: {len(shaders)} compute shaders: {len(computes)} compute pipelines, left out: '
                       + ', '.join(f'{k} {v}' for k, v in cleft.items()))
     if a.script_only: (out / 'prebuilt.tsv').write_text(st); return 0
@@ -548,7 +582,11 @@ def main(argv=None):
     for f in out.glob('*.mtl4a'):   # architectures no longer asked for
         if f.stem not in archs: f.unlink()
     (out / 'prebuilt.tsv').write_text(st)
-    rest = list(dict.fromkeys([*rest, *map(pair_of, failed_bases)]))   # the pairs the device still builds: those with function constants, then those metal-tt failed on
+    lb = out / 'layout_bases.tsv'   # the host asks the bundle for bases with a vertex layout only when this names some (nvn_mtl.m g_bundle_layouts)
+    fset = set(failed_bases); nl = len([b for b in layouts if b not in fset]) if archs else 0
+    if nl: lb.write_text(f'{nl}\n')
+    else: lb.unlink(missing_ok=True)
+    rest = list(dict.fromkeys([*rest, *map(pair_of, (b for b in failed_bases if len(b) == 4))]))   # the pairs the device still builds: those with function constants, then those metal-tt failed on (a base with a vertex layout metal-tt failed on is the device's at its draw, not a pair's prebuild)
     rp = out / 'rest_pairs.tsv'
     if rest: rp.write_text(''.join(f'{v}\t{f}\n' for v, f in rest))
     else: rp.unlink(missing_ok=True)

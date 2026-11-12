@@ -224,6 +224,40 @@ int main(void) { @autoreleasepool {
         EXPECT("probe: no eligible sample cannot establish coverage", 0, pso_bundle_covers(pre_parse(sparse), pre_stamp(sparse, 0), 0, nil));
         put([bundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(txt, 0));
     }
+    // A bundle with bases that have a vertex layout (pso_offline.py --layouts, rows as pso_capture.py writes them): its layout_bases.tsv makes arch_lookup ask the bundle for a base with a
+    // layout, which it found nowhere before (a bundle held the pairs' bases alone, and a lookup with a layout skipped it), and the lookup finds the base metal-tt compiled
+    @autoreleasepool {
+        NSString *b2 = [root stringByAppendingPathComponent:@"bundle_layouts"], *rows = [tables stringByAppendingPathComponent:@"pso_layouts.tsv"];
+        NSString *vdj = @"{\"input_primitive_topology\":\"Triangle\",\"vertex_descriptor\":{\"attributes\":[{\"buffer_index\":16,\"format\":\"Float4\"}],\"layouts\":[{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{\"stride\":16}]}}";
+        put(rows, [NSString stringWithFormat:@"# layouts\nv1_bp\tmain0\tf1_b\tmain0\t%@\n", vdj]);
+        put([tables stringByAppendingPathComponent:@"no_pairs.tsv"], @"# none\n");
+        int rc = sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/no_pairs.tsv --no-compute --layouts %@ --out %@ --work %@/work_layouts > %@/pso_offline_layouts.log 2>&1",
+                     tool, gpu, msl, tables, rows, b2, root, root]);
+        EXPECT("layouts: pso_offline.py built the bundle", 0, rc);
+        NSString *nl = [NSString stringWithContentsOfFile:[b2 stringByAppendingPathComponent:@"layout_bases.tsv"] encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("layouts: layout_bases.tsv counts the base", 1, nl.intValue);
+        id<MTL4Archive> real = g_arch_bundle; int real_l = g_bundle_layouts; NSArray *r4 = g_arch4, *r4p = g_arch4p;
+        NSMutableArray *list = [NSMutableArray array]; g_arch_bundle = nil; g_bundle_layouts = 0;
+        setenv("DM_PSO_BUNDLE", b2.UTF8String, 1); pso_bundle_open(list);
+        EXPECT("layouts: the bundle opened and says it holds bases with a layout", 1, g_arch_bundle != nil && g_bundle_layouts == 1);
+        g_arch4 = @[]; g_arch4p = list;
+        NSError *le = nil;
+        id<MTLLibrary> vl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[msl stringByAppendingPathComponent:@"v1_bp.metallib"]] error:&le];
+        id<MTLLibrary> fl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[msl stringByAppendingPathComponent:@"f1_b.metallib"]] error:&le];
+        MTL4LibraryFunctionDescriptor *vf = [MTL4LibraryFunctionDescriptor new]; vf.library = vl; vf.name = @"main0";
+        MTL4LibraryFunctionDescriptor *ff = [MTL4LibraryFunctionDescriptor new]; ff.library = fl; ff.name = @"main0";
+        MTL4RenderPipelineDescriptor *m = [MTL4RenderPipelineDescriptor new]; m.vertexFunctionDescriptor = vf; m.fragmentFunctionDescriptor = ff;
+        MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor]; vd.attributes[0].format = MTLVertexFormatFloat4; vd.attributes[0].bufferIndex = 16; vd.layouts[16].stride = 16;
+        m.vertexDescriptor = vd; m.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        for (int i = 0; i < 8; i++) { MTL4RenderPipelineColorAttachmentDescriptor *a = m.colorAttachments[i];
+            a.pixelFormat = MTLPixelFormatUnspecialized; a.writeMask = MTLColorWriteMaskUnspecialized; a.blendingState = MTL4BlendStateUnspecialized;
+            a.sourceRGBBlendFactor = a.destinationRGBBlendFactor = a.sourceAlphaBlendFactor = a.destinationAlphaBlendFactor = MTLBlendFactorUnspecialized;
+            a.rgbBlendOperation = a.alphaBlendOperation = MTLBlendOperationUnspecialized; }
+        EXPECT("layouts: a base with a vertex layout is found in the bundle", 1, vl && fl && arch_lookup(m, 1, NULL) != nil);
+        g_bundle_layouts = 0; uint64_t asks = g_arch_asks;
+        EXPECT("layouts: without layout_bases.tsv the bundle is not asked for it", 1, arch_lookup(m, 1, NULL) == nil && g_arch_asks == asks);
+        g_arch_bundle = real; g_bundle_layouts = real_l; g_arch4 = r4; g_arch4p = r4p; setenv("DM_PSO_BUNDLE", bundle.UTF8String, 1);
+    }
     // a folder without this GPU's archive, and a file that is no archive (Metal crashed on one, and on a bare Mach-O header too): no archive, no crash
     @autoreleasepool {
         id<MTL4Archive> real = g_arch_bundle; NSString *other = [root stringByAppendingPathComponent:@"other"];

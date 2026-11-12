@@ -6,6 +6,7 @@
 #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <sys/clonefile.h>
 #include <mach/mach_time.h>
 #include <mach/mach.h>
 #include <dlfcn.h>
@@ -1694,6 +1695,8 @@ static void blit_note(void);   // Per-pass dump: a copy / buffer update ended th
 // allocator gave out overlapping blocks, see hle_nvn.c zcull_size; NVN runs copies in order for any game)
 enum { BW_MAX = 64 };
 static uint64_t g_bw_lo[BW_MAX], g_bw_hi[BW_MAX], g_br_lo[BW_MAX], g_br_hi[BW_MAX]; static int g_bw_n, g_br_n, g_blit_ops; static uint64_t g_blit_barriers;
+static int g_blit_disponly = 1;   // since the copy encoder's last barrier only the game's dispatches went into it (dispatch_enc)
+static int g_cs_gbar;             // the game called nvnCommandBufferBarrier since its last dispatch (dispatch_enc)
 static uint64_t g_blit_splits;   // copies / buffer updates / fills that ended an open draw pass (the residency set line; a pass ended this way stores and the next one reloads its attachments)
 uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
@@ -1713,7 +1716,7 @@ static void blit_barrier(void) {
     static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_BLIT_ORDER"); off = e && !strcmp(e, "0"); if (off) MLOG("DM_NVN_BLIT_ORDER=0: no barriers inside the copy encoder (diagnostic; brings back the fountain's vertical stripes)"); }
     // Only the stages a compute encoder has: MTLStageAll here fails Metal validation (macOS 27: "must be a valid combination of MTLStages for the current encoder type")
     if (!off) [g_blit barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:blit_vis()];
-    g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_barriers++;
+    g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_barriers++; g_blit_disponly = 1;
 }
 uint64_t mtl_blit_barriers(void) { return g_blit_barriers; }
 static int bw_hit(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_bw_n; i++) if (lo < g_bw_hi[i] && g_bw_lo[i] < hi) return 1; return 0; }
@@ -1752,7 +1755,7 @@ static id<MTL4ComputeCommandEncoder> blit_buf(uint64_t rlo, uint64_t rhi, uint64
     // range-based batching, including separate Metal buffers over one CPU range.
     if (nvn_sparse_alias(rlo, rhi) || nvn_sparse_alias(wlo, whi)) { wlo = 0; whi = ~0ull; }
     if (g_blit_ops && (g_bw_n == BW_MAX || g_br_n == BW_MAX || (rhi > rlo && bw_hit(rlo, rhi)) || bw_hit(wlo, whi) || br_hit(wlo, whi))) blit_barrier();
-    g_bw_lo[g_bw_n] = wlo; g_bw_hi[g_bw_n++] = whi; g_blit_ops++; g_gp_copies++;
+    g_bw_lo[g_bw_n] = wlo; g_bw_hi[g_bw_n++] = whi; g_blit_ops++; g_gp_copies++; g_blit_disponly = 0;
     if (rhi > rlo) { g_br_lo[g_br_n] = rlo; g_br_hi[g_br_n++] = rhi; }
     return e;
 }
@@ -1760,7 +1763,7 @@ static id<MTL4ComputeCommandEncoder> blit_buf(uint64_t rlo, uint64_t rhi, uint64
 static id<MTL4ComputeCommandEncoder> blit(void) {
     id<MTL4ComputeCommandEncoder> e = blit_raw();
     if (g_blit_ops) blit_barrier();
-    g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1;   // record as "everything written": the next operation always gets a barrier
+    g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1; g_blit_disponly = 0;   // record as "everything written": the next operation always gets a barrier
     return e;
 }
 
@@ -5289,7 +5292,7 @@ static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compress
 static struct { tex_t t; void *tex; unsigned level, slice, n; int att; } g_rtm[8]; static int g_nrtm;   // n: the layers the pass draws from slice on; att: the colour slot
 static int tex_storage_dst(const tex_t *t);
 static int mtl_fmt_depth(MTLPixelFormat f); static size_t mtl_pf_block_bytes(MTLPixelFormat pf); static int mtl_fmt_block(MTLPixelFormat f);
-static id<MTL4ComputeCommandEncoder> dispatch_enc(void); static int rb_copy_shift(const tex_t *t, id<MTLTexture> mt);
+static id<MTL4ComputeCommandEncoder> dispatch_enc(int game); static int rb_copy_shift(const tex_t *t, id<MTLTexture> mt);
 static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_t drow, size_t dimg, size_t wb, size_t rows, size_t nz, int shift);
 static uint64_t g_gsb_stores, g_gsb_bytes;
 void mtl_gsb_stats(uint64_t *n, uint64_t *bytes) { *n = g_gsb_stores; *bytes = g_gsb_bytes; }   // hle_nvn.c's power line
@@ -5366,7 +5369,7 @@ static void gsb_swz(const tex_t *t, const gsb_geo *g, unsigned n, uint64_t src, 
     _Static_assert(sizeof *p <= 128, "the swz parameters fit their arena slot");
     *p = (typeof(*p)){0, 0, g->base, pitch, img, g->layer_stride, e0n, e1s, e1n, g->xb0, g->xb1, g->by0, g->rows, g->th, g->gobs_x, (uint32_t)nvn_gob_switch2, g->td, g->z0, g->blocks_y, g->d3, g->lin};
     g_wr_epoch++; g_mdx_epoch++; sbw_note((uint64_t)(uintptr_t)t->mem, t->L.size, SBW_GPU);
-    id<MTL4ComputeCommandEncoder> e = dispatch_enc(); enc_c_pso(e, ps);
+    id<MTL4ComputeCommandEncoder> e = dispatch_enc(0); enc_c_pso(e, ps);
     enc_c_args(e, src, 0); enc_c_args(e, pg, 1); enc_c_args(e, qb.gpuAddress + qo, 2); enc_c_args(e, eb ? eb.gpuAddress : pg, 3);
     uint32_t nx = (g->xb1 - (g->xb0 & ~15u) + 15) / 16;
     enc_c_dispatch(e, MTLSizeMake((nx + 31) / 32, g->rows, n), MTLSizeMake(32, 1, 1));
@@ -8630,6 +8633,10 @@ static _Atomic uint64_t g_arch_asks;
 // A pipeline from the archive: the file the index names for its key alone, else each file without a complete index (the bundle first among the p files, which plain skips: a base
 // with a vertex layout and a compute pipeline are never in one). *from_run: it came from a run file this compaction takes, so the compacting prewarm captures it again
 static int arch_compact_takes(id<MTL4Archive> a);
+// g_arch_bundle: the archive made offline, bundled with the app (pso_bundle_open). g_bundle_layouts: it also holds bases with a vertex layout (pso_offline.py --layouts writes
+// layout_bases.tsv, their count, beside it), so arch_lookup asks it for those too. Without that file a bundle holds the pairs' bases alone, which have none, and a base with a
+// layout is not looked for in it (about 0.06 ms a miss)
+static id<MTL4Archive> g_arch_bundle; static int g_bundle_layouts;
 static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
     if (from_run) *from_run = 0;
     int compute = [d isKindOfClass:MTL4ComputePipelineDescriptor.class];
@@ -8645,6 +8652,7 @@ static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
         return ps;
     }
     if (!plain) for (id<MTL4Archive> a in g_arch4p) { id ps = ask(a); if (ps) return ps; }
+    else if (g_bundle_layouts) { id ps = ask(g_arch_bundle); if (ps) return ps; }   // a bundle made with pso_layouts.tsv holds bases with a vertex layout too (pso_bundle_open)
     for (id<MTL4Archive> a in g_arch4) { id ps = ask(a); if (ps) { if (from_run) *from_run = arch_compact_takes(a); return ps; } }
     return nil;
 }
@@ -8674,7 +8682,7 @@ static NSString *pso_user_path(void);
 // what it lacks: a draw, the prewarm and the prebuild compile a base, and the serializer captures it, only after the bundle missed (it holds no base with a vertex layout). A system
 // that cannot open it (one older than the archive's minimum, or an OS update that changed the GPU compiler) or a GPU it was not built for gets an info line, and the device builds
 // the bases itself as before (the on-device prebuild is the fallback)
-static id<MTL4Archive> g_arch_bundle; static NSString *g_bundle_dir;
+static NSString *g_bundle_dir;   // g_arch_bundle, g_bundle_layouts: before arch_lookup
 // Metal's loader crashes on malformed containers rather than returning an error. Check the GPU image's load commands and referenced file ranges, including every slice of a
 // universal archive, before giving it to Metal. This checks the container, not the compiler's private payload: Metal still decides whether this system can use its binaries.
 static int arch_macho_ok(int fd, uint64_t off, uint64_t size) {
@@ -8736,13 +8744,45 @@ static int arch_file_ok(NSString *path) {
     struct stat st; int ok = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && arch_container_ok(fd, (uint64_t)st.st_size);
     close(fd); return ok;
 }
+// An archive the app carries as <gpu>.mtl4x (build_ipa.sh): the pipeline archive with "DMPA" in place of its Mach-O magic, so an installer that signs every Mach-O of the app
+// (LiveContainer, which failed on the 2.6 GB applegpu_g19p.mtl4a) leaves it alone. It becomes Documents/pso_bundle/<gpu>.mtl4a again: an APFS clone of the bundle's file (no
+// extra space but the one block the magic is written to), made once per bundled file (pso_bundle/<gpu>.stamp: its size and modification time). Without a clone (another volume,
+// no APFS) it is left out rather than copied whole: the bases are then built on the device, as with no archive. Returns the archive's path, or nil
+static NSString *pso_bundle_unwrap(NSString *dir, NSString *gpu) {
+    NSString *src = [dir stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"mtl4x"]], *user = pso_user_path();
+    struct stat ss; if (!user || stat(src.fileSystemRepresentation, &ss)) return nil;
+    NSString *out = [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_bundle"];
+    NSString *dst = [out stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"mtl4a"]], *stp = [out stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"stamp"]];
+    NSString *want = [NSString stringWithFormat:@"%lld %ld.%09ld", (long long)ss.st_size, (long)ss.st_mtimespec.tv_sec, (long)ss.st_mtimespec.tv_nsec];
+    NSString *have = [NSString stringWithContentsOfFile:stp encoding:NSUTF8StringEncoding error:nil];
+    if ([have isEqualToString:want] && [NSFileManager.defaultManager fileExistsAtPath:dst]) return dst;
+    [NSFileManager.defaultManager createDirectoryAtPath:out withIntermediateDirectories:YES attributes:nil error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:stp error:nil]; [NSFileManager.defaultManager removeItemAtPath:dst error:nil];   // an older app's clone holds that app's blocks: it goes first
+    NSString *tmp = [dst stringByAppendingString:@".new"]; [NSFileManager.defaultManager removeItemAtPath:tmp error:nil];
+    uint64_t t0 = bp_now();
+    if (clonefile(src.fileSystemRepresentation, tmp.fileSystemRepresentation, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)) {
+        MLOG("[RED] pipeline archive bundled with the app: %s could not be cloned into %s (errno %d): the bases are built on the device", src.UTF8String, out.UTF8String, errno); return nil;
+    }
+    static const uint8_t mark[4] = {'D', 'M', 'P', 'A'}, magic[4] = {0xcf, 0xfa, 0xed, 0xfe};   // MH_MAGIC_64, as stored
+    uint8_t head[4] = {0}; int fd = open(tmp.fileSystemRepresentation, O_RDWR);
+    int ok = fd >= 0 && pread(fd, head, 4, 0) == 4 && !memcmp(head, mark, 4) && pwrite(fd, magic, 4, 0) == 4 && !fsync(fd);
+    if (fd >= 0) close(fd);
+    if (!ok || rename(tmp.fileSystemRepresentation, dst.fileSystemRepresentation)) {
+        MLOG("[RED] pipeline archive bundled with the app: %s is not a marked archive or could not be restored (errno %d): the bases are built on the device", src.UTF8String, errno);
+        [NSFileManager.defaultManager removeItemAtPath:tmp error:nil]; return nil;
+    }
+    [want writeToFile:stp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    MLOG("pipeline archive bundled with the app: %s cloned to %s and its Mach-O magic restored (%.1f ms)", src.lastPathComponent.UTF8String, dst.UTF8String, (bp_now() - t0) / 1e6);
+    return dst;
+}
 static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     const char *e = getenv("DM_PSO_BUNDLE");
     if (!e || !*e || !strcmp(e, "off")) return;
     NSString *dir = @(e), *gpu = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil;
     NSString *p = gpu ? [dir stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"mtl4a"]] : nil;
+    if (p && ![NSFileManager.defaultManager fileExistsAtPath:p]) { NSString *u = pso_bundle_unwrap(dir, gpu); if (u) p = u; }
     if (!p || ![NSFileManager.defaultManager fileExistsAtPath:p]) {
-        NSArray<NSString *> *have = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
+        NSArray<NSString *> *have = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a' OR self ENDSWITH '.mtl4x'"]];
         MLOG("pipeline archive bundled with the app: none for this GPU (%s; %s has %s): the bases are built on the device", gpu ? gpu.UTF8String : "architecture unknown", e,
              have.count ? [have componentsJoinedByString:@", "].UTF8String : "none");
         return;
@@ -8753,7 +8793,10 @@ static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     if (!a) { MLOG("pipeline archive bundled with the app: this system cannot open %s (%s; made for another system version, or an OS update changed the GPU compiler): the bases are built on the device",
                    p.UTF8String, ae.localizedDescription.UTF8String); return; }
     g_arch_bundle = a; g_bundle_dir = dir; [archp addObject:a];
-    MLOG("pipeline archive bundled with the app: %s, %.1f MB, opened in %.1f ms", p.UTF8String, [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize] / 1048576.0, (bp_now() - t0) / 1e6);
+    NSString *lt = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"layout_bases.tsv"] encoding:NSUTF8StringEncoding error:nil];
+    int nl = lt ? lt.intValue : 0; g_bundle_layouts = nl > 0;
+    MLOG("pipeline archive bundled with the app: %s, %.1f MB, opened in %.1f ms%s", p.UTF8String, [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize] / 1048576.0, (bp_now() - t0) / 1e6,
+         nl > 0 ? [NSString stringWithFormat:@"; it holds %d bases with a vertex layout (layout_bases.tsv)", nl].UTF8String : "");
 }
 // gpuarchiver-* folders are Metal's private compiler state. On the Mac their parent is shared by every program: a directory appearing during our capture or flush may belong
 // to another compiler, and serialization success does not end its lifetime. Only our output archives are ours to remove. iOS can reclaim previous runs' app-private folders
@@ -8767,8 +8810,20 @@ static NSSet<NSString *> *ga_list(void) {
     NSArray<NSString *> *a = ga_dir() ? [NSFileManager.defaultManager contentsOfDirectoryAtPath:ga_dir() error:nil] : nil;
     return [NSSet setWithArray:[a filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH 'gpuarchiver-'"]] ?: @[]];
 }
+// DM_PSO_CAPTURE=<folder> (a tool run on the Mac, dm/gfx/tools/pso_capture.py): each flush period captures the descriptors of what it compiles instead of their binaries, and
+// arch_write_file writes them as a Metal 4 pipelines script, <folder>/<seq>.mtl4-json (the format metal-tt reads), instead of an archive file. A library loaded from memory is
+// named there by the SHA-256 of its file, which pso_capture.py maps back to its name, so pso_offline.py can compile the same descriptors for an iPhone's GPU: the bases with a
+// vertex layout that the prewarm lists' render pipelines need, which the bundled archive of pair bases (no vertex layout) does not hold. Run with DM_PSO_ARCHIVE at an empty
+// folder, so that every base is compiled (and captured) rather than taken from an archive
+static NSString *pso_capture_dir(void) {
+    static NSString *d; static dispatch_once_t once;
+    dispatch_once(&once, ^{ const char *e = getenv("DM_PSO_CAPTURE"); if (e && *e) { d = @(e); [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+        MLOG("DM_PSO_CAPTURE: the flush periods capture pipeline descriptors into pipelines scripts in %s, and write no archive files", e); } });
+    return d;
+}
 static ArchEpoch *ep_new(void) {   // a flush period: its compiler and serializer, nil when Metal makes none
-    MTL4PipelineDataSetSerializerDescriptor *sd = [MTL4PipelineDataSetSerializerDescriptor new]; sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
+    MTL4PipelineDataSetSerializerDescriptor *sd = [MTL4PipelineDataSetSerializerDescriptor new];
+    sd.configuration = pso_capture_dir() ? MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors : MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
     ArchEpoch *ep = [ArchEpoch new]; ep->ser = [g_dev newPipelineDataSetSerializerWithDescriptor:sd];
     if (!ep->ser) return nil;
     MTL4CompilerDescriptor *cd = [MTL4CompilerDescriptor new]; cd.pipelineDataSetSerializer = ep->ser;
@@ -9028,6 +9083,14 @@ static void arch_write(ArchEpoch *ep) {
 static void arch_write_file(ArchEpoch *ep) {
     int n = atomic_load(&ep->n), vd = atomic_load(&ep->vd), cs = atomic_load(&ep->cs), ms = atomic_load(&ep->ms);   // exact: no compile of the period is under way
     if (!n) return;
+    if (pso_capture_dir()) {   // DM_PSO_CAPTURE: the period's descriptors as a pipelines script, no archive file
+        NSError *se = nil; NSData *js = [ep->ser serializeAsPipelinesScriptWithError:&se];
+        NSString *sp = [pso_capture_dir() stringByAppendingPathComponent:[NSString stringWithFormat:@"%05d-%d.mtl4-json", g_arch_seq++, n]];
+        if (!js || ![js writeToFile:sp atomically:YES]) MLOG("[RED] DM_PSO_CAPTURE: writing %s failed%s%s", sp.UTF8String, se ? ": " : "", se ? se.localizedDescription.UTF8String : "");
+        else MLOG("DM_PSO_CAPTURE: %d pipelines' descriptors written to %s (%.1f MB)", n, sp.UTF8String, js.length / 1048576.0);
+        atomic_fetch_sub(&g_arch_new, n); atomic_fetch_sub(&g_arch_new_vd, vd);
+        return;
+    }
     [NSFileManager.defaultManager createDirectoryAtPath:g_arch_dir withIntermediateDirectories:YES attributes:nil error:nil];
     uint64_t t0 = bp_now(); NSError *e = nil;
     NSString *path = [g_arch_dir stringByAppendingPathComponent:vd || cs ? [NSString stringWithFormat:@"%05d-%d.mtl4a", g_arch_seq++, n] : [NSString stringWithFormat:@"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];
@@ -9283,8 +9346,10 @@ static int hybrid_on(void);
 // for the seconds it took. Speculative builds (pso_pend_kick: at most PSO_PEND_ACTIVE at a time) keep the global queue, so a demanded build never waits behind speculation
 static dispatch_queue_t pp_bg_queue(void) {
     static dispatch_queue_t q[8]; static int n; static _Atomic unsigned rr; static dispatch_once_t once;
+    // At least two: an iPhone 18 Pro (A20 Pro, two performance cores) had one, and a hot phone built about one base in 1.8 s on it at utility QoS, so after a scene change the
+    // demanded builds filled the table (PSO_PEND_MAX) for minutes (Ocarina of Time, FF build, 2026-11-12: 384 in flight, about 6 done every 300 frames)
     dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
-        n = pc / 2 > 8 ? 8 : pc / 2;
+        n = pc / 2 > 8 ? 8 : pc / 2 < 2 ? 2 : pc / 2;
         for (int i = 0; i < n; i++) q[i] = dispatch_queue_create("dm.nvn.pso-bg", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
     return q[atomic_fetch_add(&rr, 1) % (unsigned)n];
 }
@@ -9328,6 +9393,20 @@ static int pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // No
     pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), !k->border, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     return 1;
 }
+// A demanded build the table refused (every slot held by a build not finished, pso_pend_slot): its draws keep their stand-in, and the key is not looked up again (pso_desc,
+// pso_build_ex, pso_pend_demand, the submission's prediction, which with no free slot admits nothing) until PSO_REFUSED_RETRY_NS after the refusal. Each look cost the submit
+// thread a descriptor and a base lookup at every draw of every frame: an iPhone 18 Pro (Ocarina of Time, FF build, 2026-11-12) drew about 270 draws a frame with stand-ins
+// while the table stayed full, at 50k instructions a draw against 18k without stand-ins. g_pp_refused: key -> bp_now() at the refusal, | 1 (never NULL; submit thread)
+enum { PSO_REFUSED_RETRY_NS = 250000000 };
+static nvn_hmap g_pp_refused = {.klen = sizeof(pso_key)};
+static uint64_t g_pp_refused_n, g_pp_refused_skips;   // refusals; draws that took their stand-in without the lookup
+static int pso_refused_recent(const pso_key *k) {
+    uint64_t t = (uint64_t)(uintptr_t)nvn_hm_get(&g_pp_refused, k);
+    if (!t) return 0;
+    if (bp_now() - (t & ~1ull) < PSO_REFUSED_RETRY_NS) return 1;
+    nvn_hm_del(&g_pp_refused, k); return 0;
+}
+static void pso_refused_note(const pso_key *k) { g_pp_refused_n++; nvn_hm_put(&g_pp_refused, k, (void *)(uintptr_t)(bp_now() | 1)); }
 // The build a hybrid draw asked for while it draws with its stand-in: outside the speculative limit, on pp_bg_queue
 static int pso_pend_demand(const pso_key *k, NvShader *vs, NvShader *fs) {
     if (hm_get_id(&g_pso, k)) return 0;
@@ -9409,6 +9488,8 @@ void mtl_pso_line(char *o, size_t n) {
              (unsigned long long)d[8], d[9] / 1e6, (unsigned long long)d[12], (unsigned long long)d[13], (unsigned long long)d[17], (unsigned long long)d[14], (unsigned long long)d[15], (unsigned long long)d[16], (unsigned long long)(v[14] - v[15] - v[16]));
     memcpy(p, v, sizeof p);
     static uint64_t pn[5], pns[5]; size_t o2 = strlen(o);
+    { static uint64_t prn, prs; o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; demanded builds refused (table full) %llu, draws on their stand-in without a lookup %llu",
+                                               (unsigned long long)(g_pp_refused_n - prn), (unsigned long long)(g_pp_refused_skips - prs)); prn = g_pp_refused_n; prs = g_pp_refused_skips; }
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
     for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
@@ -9720,6 +9801,8 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     if (!took && !g_pso_lmap && !ms_fn && hybrid_on()) {
         why = !vs->has_pull || vs->layer_out ? 3 : 4;
         int st = pso_pend_try(&k, &ps);
+        __unsafe_unretained id<MTLRenderPipelineState> hr = st == 0 && pso_refused_recent(&k) ? hm_get_id(&g_pso_hy, &k) : nil;
+        if (hr) { g_pp_refused_skips++; g_pso_pull = 1; g_hy_ns += bp_now() - bt; return hr; }   // refused a moment ago: its stand-in, no lookup (pso_refused_recent)
         if (st == 2) took = 1;   // built in the background (nil: it failed, and is built again below for its message)
         else {
             if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), !k.border, &e, 0);   // its base made or archived: no compile
@@ -9727,7 +9810,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
                 // Demand first (main's order): the draw's own pipeline is queued before the prediction admits speculative builds; with a stand-in nothing waits for it
                 __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
                 if (h) {
-                    if (st == 0) pso_pend_demand(&k, vs, fs);
+                    if (st == 0 && !pso_pend_demand(&k, vs, fs)) pso_refused_note(&k);
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
                     return h;
@@ -14485,10 +14568,18 @@ static int dispatch_own(void) {
     if (v < 0) { const char *e = getenv("DM_NVN_DISPATCH_OWN"); v = (e && !strcmp(e, "1")) || pg_on(); if (v) MLOG("compute dispatches: each in an encoder of its own (DM_NVN_DISPATCH_OWN=1 or DM_NVN_PASSGPU)"); }
     return v;
 }
-static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
+// DM_NVN_DISPATCH_OVERLAP (profile key dispatch_overlap): two of the game's dispatches with nothing between them in the copy encoder and no nvnCommandBufferBarrier of the game's
+// between them run side by side, as NVN lets them: it orders a dispatch after earlier work only through a barrier. A copy, fill or inline update between them, a host dispatch
+// (dispatch_enc's game 0) or a game barrier keeps the barrier, and what comes after a dispatch other than a dispatch still waits for it (everything written). Ocarina of Time runs
+// 117 dispatches at the start of a frame in Kokiri Forest, each waiting for the one before: 5.7 ms; with no barrier between any of them 2.6 ms
+static uint64_t g_disp_beside, g_disp_ordered; static int g_disp_last_beside;
+static int dispatch_overlap(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DISPATCH_OVERLAP"); v = e ? atoi(e) != 0 : DM_GAME_DISPATCH_OVERLAP; if (v) MLOG("dispatch overlap: the game's dispatches with no barrier of its between them run side by side (DM_NVN_DISPATCH_OVERLAP=0 orders each after the one before)"); } return v; }
+static id<MTL4ComputeCommandEncoder> dispatch_enc(int game) {   // game: one of the game's dispatches (0: the host's own, ordered as a copy is)
     id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
-    if (g_blit_ops) blit_barrier();
-    g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1;   // recorded as "everything written": the next copy or dispatch gets a barrier
+    int beside = game && g_blit_ops && g_blit_disponly && !g_cs_gbar && dispatch_overlap();
+    if (g_blit_ops && !beside) blit_barrier();
+    if (game) { g_disp_last_beside = beside; if (beside) g_disp_beside++; else g_disp_ordered++; g_cs_gbar = 0; }
+    g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1; g_blit_disponly = game;   // recorded as "everything written": the next copy, or a dispatch after a game barrier, gets a barrier
     if (!g_blit_ct) { [e setArgumentTable:g_ct]; g_blit_ct = 1; }
     args_dirty_all();
     return e;
@@ -14516,6 +14607,23 @@ static void bufsnap_after(NvShader *cs, id ce) {
     NSString *key = @(cs->key);
     [g_commit_blocks addObject:^{ BOOL ok = [[NSData dataWithBytes:dst.contents length:n] writeToFile:path atomically:NO];
         MLOG("bufsnap after %s: %zu bytes %s %s", key.UTF8String, n, ok ? "saved to" : "could not be written to", path.UTF8String); }];
+}
+static int up_mfx_named(NvShader *cs);
+static int up_mfx_on(void);
+// An upscaler that is a chain of shaders (profile upscaler_chain "<stage>,...><last>"; Ocarina of Time: agl_ndsr_vr's feature pass at 1/4 size, its network and its blend at the
+// input size, then agl_ndsr_vr_light's scale to the output). With DM_UPSCALER=metalfx the stages are skipped, the first one's colour input is kept, and the last one's dispatch is
+// MetalFX's spatial scaler from that colour into the last one's image (up_mfx_encode). Once the last one is refused, the chain's shaders run again from the next frame on
+static int g_up_chain_in;          // texture ID the first stage would have read, 0 when none this frame
+static int g_up_chain_refused;
+// The last stage may be one of several ("><last>|<last>..."): Ocarina of Time's agl_ndsr_vr picks its network by the scale from the render size to the output (aad7ea7e at 1280x720
+// to 1920x1080, b106afba at the Potato preset's 1169x658, fa3033d0 at 1.33x, 04135bb8 at 2x, 8df148d5 at 1.1x; oot2 12c5bfaa). With one last stage only, another network ended the
+// chain, MetalFX was refused and the game's own chain ran: the Potato preset saved no GPU time
+static int up_chain_role(NvShader *cs) {   // 1 a stage before the last (2: the first), 3 the last, 0 none
+    static const char *c = DM_GAME_UPSCALER_CHAIN; if (!*c || !cs->key[0]) return 0;
+    const char *last = strchr(c, '>'); if (!last) return 0;
+    for (const char *l = last + 1; strlen(l) >= 16; l += 17) { if (!strncmp(l, cs->key, 16)) return 3; if (l[16] != '|') break; }
+    for (const char *k = c; k < last; k += 17) if (!strncmp(k, cs->key, 16)) return k == c ? 2 : 1;
+    return 0;
 }
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
@@ -14567,6 +14675,28 @@ static void dispatch(const p_dispatch *dp) {
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
+    {   int role = up_mfx_on() && !g_up_chain_refused ? up_chain_role(cs) : 0;
+        if (role == 2) { g_up_chain_in = 0; for (int i = 0; i < cs->rf.nb; i++) if (cs->rf.b[i].kind == NVN_RB_TEX) { g_up_chain_in = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[i].reg) & 0xfffff); break; } }
+        if (role == 1 || role == 2) { if (g_up_chain_in) return; }   // its work is MetalFX's now
+        if (role == 3) {
+            if (g_up_chain_in && !dp->ind && up_mfx_encode(cs)) { g_up_chain_in = 0; return; }
+            if (g_up_chain_in) { g_up_chain_refused = 1; MLOG("[RED] upscaler chain: MetalFX refused the last stage %s; the game's chain runs from the next frame on", cs->key); }
+            g_up_chain_in = 0;
+        }
+        // A chain whose first stages were skipped for MetalFX but that ends at another upscaler than the profile's last stage: that stage would read the skipped stages'
+        // outputs, so the picture comes out black (Ocarina of Time at its own 1440x810: the chain ends at b106afba1a18faa9, not aad7ea7e5c02f41d; at a fixed 720p it ends at the listed
+        // stage). The game's whole chain runs from the next frame on; this frame's picture is lost once
+        // kid-with-sword-remake V19: another of the game's upscaler shaders after the skipped stages is taken as the last stage too. The game picks its final network by the
+        // scale (Ocarina of Time: aad7ea7e at its own 1440x810, b106afba at 0.6, 8df148d5 at 0.667, d99fbeeb at 0.25), and each one MetalFX drew reads the first stage's input like
+        // the listed ones. At render scale 0.25 the chain ended at d99fbeeb, which was not listed, so the game's whole network ran every frame (logs 59, 60: GPU 12-13 ms, as at 0.6
+        // with MetalFX). Only when MetalFX refuses it does the game's chain run from the next frame on
+        if (!role && g_up_chain_in && up_mfx_named(cs)) {
+            static char took[8][20]; static int nt; int k; for (k = 0; k < nt && strcmp(took[k], cs->key); k++) {}
+            if (k == nt && nt < 8) { strlcpy(took[nt++], cs->key, 20); MLOG("upscaler chain: %s ends it, taken as the last stage (not in the profile's list)", cs->key); }
+            if (!dp->ind && up_mfx_encode(cs)) { g_up_chain_in = 0; return; }
+            g_up_chain_refused = 1; g_up_chain_in = 0;
+            MLOG("[RED] upscaler chain: it ended at %s, not at the profile's last stage, after its first stages were skipped, and MetalFX refused it; the game's chain runs from the next frame on", cs->key);
+        } }
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups
@@ -14589,7 +14719,8 @@ static void dispatch(const p_dispatch *dp) {
     // or before dispatch_enc's copy-to-dispatch barrier: otherwise the upgrade opens a second encoder, or its copy races the dispatch (#1743).
     encode_args(nil, cs, 5, 0);
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc(1);
+    PD("X %llu dispatch %s groups %llux%llux%llu%s%s", g_stat_pass, cs->key, (unsigned long long)dp->x, (unsigned long long)dp->y, (unsigned long long)dp->z, dp->ind ? " indirect" : "", own ? " (own encoder)" : g_disp_last_beside ? " beside the one before" : " after a barrier");
     enc_c_pso(ce, ps);
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);
@@ -14627,7 +14758,7 @@ static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_
     id<MTLBuffer> pb; size_t po = arena_alloc(48, &pb);
     struct { uint64_t s, d; uint32_t w, h, row, img, drow, dimg, shift; } *p = (void *)((uint8_t *)pb.contents + po);
     *p = (typeof(*p)){src, dst, (uint32_t)(wb / 2), (uint32_t)rows, (uint32_t)row, (uint32_t)img, (uint32_t)drow, (uint32_t)dimg, (uint32_t)shift};
-    id<MTL4ComputeCommandEncoder> e = dispatch_enc();
+    id<MTL4ComputeCommandEncoder> e = dispatch_enc(0);
     [g_ct setAddress:pb.gpuAddress + po atIndex:0]; enc_c_pso(e, ps);
     enc_c_dispatch(e, MTLSizeMake((wb / 2 + 63) / 64, rows, nz), MTLSizeMake(64, 1, 1));
     static int once; if (!once++) MLOG("RGB565-family copy between guest memory and a host texture: red and blue exchanged on the GPU (first case %zux%zux%zu texels)", wb / 2, rows, nz);
@@ -15639,7 +15770,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : order ? " (render pass open; a later shader write is ordered after its draws)" : g_enc ? " (render pass open)" : "");
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
-                if (bits) { g_game_barrier |= bits; g_fb_bar++; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
+                if (bits) { g_game_barrier |= bits; g_fb_bar++; g_cs_gbar = 1; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare); g_cs_gbar: dispatch_enc
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;
         }
@@ -16120,7 +16251,7 @@ static int fx_mode(void) {
     if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
     else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
     else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
-    // Only for a fixed DM_FRAMEGEN_SCALE below 1: the pixel budget's frames (Wide view: 0.90) are brought back by the present's bilinear pass. Turned on for the budget whenever the
+    // Only for a fixed DM_FRAMEGEN_SCALE below 1: the pixel budget's frames (a 16:9 phone picture: 0.75) are brought back by the present's bilinear pass. Turned on for the budget whenever the
     // screen had more pixels than it, every present of a 16:9 picture went through MetalFX's spatial scaler (1920x1080 -> 2144x1206, p50 0.7-1.8 ms, p95 up to 4.5 ms, against
     // 0.1-0.4 ms bilinear), twice a game frame with frame generation, and with the game at 16-18 ms and the interpolation at 7-9 ms an iPhone 18 Pro Max dropped 62-86 of 300 frames (X14, log 10)
     if (!v && fg_on() && fg_fixed() && fg_fixed() < 1) { v = 1; MLOG("present upscaling: metalfx, as frame generation makes its frames smaller than shown (DM_FRAMEGEN_SCALE)"); }
@@ -16279,6 +16410,7 @@ static int up_mfx_encode(NvShader *cs) {
     for (int i = 0; i < cs->rf.nb; i++) { int k = cs->rf.b[i].kind; if (k == NVN_RB_TEX && ti < 0) ti = i; else if (k == NVN_RB_IMG && oi < 0) oi = i; else if (k == NVN_RB_TEX || k == NVN_RB_IMG) return 0; }
     if (ti < 0 || oi < 0) { static int once; if (!once++) MLOG("[RED] upscaler %s: not one texture and one image; the shader draws", cs->key); return 0; }
     int tin = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff), tout = cs->rf.b[oi].reg < 32 ? (int)(S.img[5][cs->rf.b[oi].reg] & 0xfffff) : 0;
+    if (g_up_chain_in && up_chain_role(cs) == 3) tin = g_up_chain_in;   // a chain: the first stage's colour, the stages between skipped
     tex_t dout = {0}; id<MTLTexture> in, out;
     os_unfair_lock_lock(&g_rmu);
     int ok = tin > 0 && tin < g_ntreg && g_treg[tin].ok && tout > 0 && tout < g_ntreg && g_treg[tout].ok;
@@ -16295,7 +16427,7 @@ static int up_mfx_encode(NvShader *cs) {
     if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
         fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !up_mfx_rect(v, in.width, in.height, &ir) || !up_mfx_rect(v + 4, out.width, out.height, &orr) ||
         orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height)) { g_up_mfx_kept++; return 0; }
-    int srgb = cs->up_color == UP_COLOR_SRGB;
+    int srgb = cs->up_color == UP_COLOR_SRGB && !(g_up_chain_in && up_chain_role(cs) == 3);   // a chain's colour: the scene's linear HDR (R11G11B10F)
     up_mfx_scaler *e = up_mfx_scaler_for((NSUInteger)ir.width, (NSUInteger)ir.height, (NSUInteger)orr.width, (NSUInteger)orr.height, srgb); if (!e) { g_up_mfx_kept++; return 0; }
     id<MTL4FXSpatialScaler> sc = e->sc;
     // Straight in and out when MetalFX can take the game's textures as they are; through the scaler's own textures otherwise
@@ -16565,22 +16697,31 @@ static double g_link_vperiod, g_link_vhalf;   // virtual ticks (link_range): sec
 // Under g_pq_mu; g_fg_owing (display link thread only) marks that present for present_now. g_fg_tick: the interval between counted ticks (a running mean)
 static pq_item g_fg_owe; static uint64_t g_fg_owe_tk; static double g_fg_owe_at, g_fg_tick; static int g_fg_owed;
 static uint64_t g_fg_late;
-// Frame generation pauses while frames drop: a generated frame between two presents that came late, or shown while a newer present already waits, mixes guessed pictures
-// into a rhythm of held ones, and the picture flickered while frames dropped (the owner, X6 on an iPhone, log 73: thermal state 1, 12-45 of 300 frames dropped).
-// A present that comes late (a tick found its interval over and nothing new to show: g_fg_starved) or is taken over older ones dropped for it stops them until FG_STEADY presents
-// in a row have come in time; the game's frames are shown as it draws them meanwhile. All on the display link thread, under g_pq_mu. Judged by the link's ticks, not by the
-// time between presents, which a game's own pacing varies
-// A lone drop pauses them for that present alone: three after each one showed as a 30 fps blip about every 1.5 s, 497 presents of about 7,600 (X10b, log 6). Only a drop
-// within FG_AGAIN presents of the one before, frames dropping on and on, takes the FG_STEADY presents, so guessed pictures do not mix into a rhythm of held ones (the flicker)
-#define FG_STEADY 3
+// Frame generation never falls back to the game's 30 fps (the owner: 60 stable, no switching to 30). X6-FF2 paused the generated frames while frames dropped and then stopped
+// the interpolation for 30-60 presents; each stop showed as the picture switching from 60 to 30 and back: 8 stops in 90 s in FF2's log 17 (thermal 1 to 2, the game 11-24 ms
+// and the interpolation 5-10 ms at 1920x1080 a frame), 11 in two minutes in log 15. Now a present that came late (a tick found its interval over and nothing new to show:
+// g_fg_starved) still shows its generated frame first: the frame between the picture held on screen and the new one, so the late frame reads as a slower step, not a jump.
+// Only a present taken over older ones dropped for it shows its own picture alone, that present only (g_fg_paused_behind): the screen is behind and catches up.
+// All on the display link thread, under g_pq_mu. Judged by the link's ticks, not by the time between presents, which a game's own pacing varies
 #define FG_AGAIN 30
-static int g_fg_steady, g_fg_starved, g_fg_need = 1; static uint64_t g_fg_paused_late, g_fg_paused_behind, g_fg_last_drop;
-// While frames keep dropping, the interpolation is not run at all (g_fg_shed, read by snap_take): pausing only what is shown left it costing its GPU time just when the GPU was
-// short (X11 on a hot iPhone, log 8: the game 19-22 ms and the interpolation 10 ms a frame against 33, 55-123 of 300 frames dropped). A second drop within FG_AGAIN presents of
-// the one before stops it: waiting for a run of six within 60 (X14's first build) kept it running over budget, 62-86 of 300 frames dropped (log 10). It runs again after
-// g_fg_resume presents in a row in time: 30 (a second), and 60 at most on repeats (X12 doubled it up to 300, 10 s at 30 fps: nine long stops in four minutes in log 9), back to 30
-// after a minute in time. Decided by dropped frames, not by the device's temperature
-static _Atomic int g_fg_shed; static int g_fg_resume = 30; static uint64_t g_fg_sheds, g_fg_shed_frames, g_fg_calm;
+static int g_fg_starved; static uint64_t g_fg_paused_behind, g_fg_last_drop, g_fg_drops;
+// Frames dropping on and on (a second drop within FG_AGAIN presents of the one before) make the interpolation lighter instead: the pixel budget's next step (fg_level_down,
+// g_fg_budget), smaller generated and shown frames brought back to the screen's size by the present's bilinear pass; past the last step it stays there and keeps running.
+// Its cost follows its pixels, so 960x540 costs about a quarter of 1920x1080, and the GPU's lighter load is less heat. The first step is a phone's whole 1920x1080, X9's
+// picture: FF3 started at 1440x810, stepped down to 960x540 in the first seconds' loading and stayed there all session (log 18), soft next to X9 (the owner). A step back up
+// after FG_UP_CALM presents in a row in time (20 s at 30 fps; a minute kept FF3 at 960x540), twice that, up to FG_UP_CALM_MAX, when the step up was followed by another
+// step down within FG_UP_BACK presents. A hitch (a present FG_HITCH present intervals or more after the one before: a load, a scene change, a pipeline built) drops frames
+// whatever the interpolation costs, and is not counted toward a step down. Decided by dropped frames, not by the temperature
+// The first step is no budget at all, the picture as shown (Wide view's 2352x1080 too: FF4 has Wide view on by default, and its frames at 1920x1080's budget were 0.90 of it)
+enum { FG_LEVELS = 5, FG_UP_CALM = 600, FG_UP_CALM_MAX = 7200, FG_UP_BACK = 600, FG_HITCH = 3 };
+static const double g_fg_budget[FG_LEVELS] = {1e12, 1920.0 * 1080, 1440.0 * 810, 1200.0 * 675, 960.0 * 540};
+static const char *const g_fg_budget_name[FG_LEVELS] = {"full (as shown)", "1920x1080", "1440x810", "1200x675", "960x540"};
+static double g_fg_take_ts;   // the display time of the last present taken (display link thread, under g_pq_mu), for FG_HITCH
+static uint64_t g_fg_hitches;
+static _Atomic int g_fg_level;   // the budget's step: changed on the display link thread under g_pq_mu, read where the snapshots are sized (fg_shown_size)
+static _Atomic uint64_t g_fg_shown_px;   // the pixels of the last picture sized for frame generation as shown (fg_shown_size), for fg_level_down
+static uint64_t g_fg_lvl_calm, g_fg_up_at, g_fg_lvl_downs, g_fg_lvl_ups; static int g_fg_up_need = FG_UP_CALM;
+static int fg_level_down(void);
 
 // A display link callback whose present took 50 ms or more (three ticks): where the time went, so a silent link (the rescue below) can be traced to its wait.
 // what: the picture shown; snap: the wait for the encode thread to commit its snapshot; present: present_now, alloc of it waiting for a present allocator, res for the residency commit
@@ -16644,8 +16785,10 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
         if (!newer && g_dm_present_link && !g_rescue_mode) {
             pq_item ow = g_fg_owe; uint64_t tk = g_fg_owe_tk;
             if (!(++g_fg_shown % 1800)) MLOG("frame generation on the display link: %llu generated frames shown, each followed by its present's own picture; %llu of those skipped for a newer present; "
-                                             "presents shown without theirs while frames dropped: %llu late or after a late one, %llu taken over dropped ones or after them; interpolation stopped %llu times, for %llu presents", (unsigned long long)g_fg_shown, (unsigned long long)g_fg_late,
-                                             (unsigned long long)g_fg_paused_late, (unsigned long long)g_fg_paused_behind, (unsigned long long)g_fg_sheds, (unsigned long long)g_fg_shed_frames);
+                                             "presents dropped or late %llu (%llu of them hitches, not counted toward a lighter step), %llu shown without theirs (taken over dropped ones); "
+                                             "made lighter %llu times and back %llu times, now the %s pixel budget", (unsigned long long)g_fg_shown, (unsigned long long)g_fg_late,
+                                             (unsigned long long)g_fg_drops, (unsigned long long)g_fg_hitches, (unsigned long long)g_fg_paused_behind,
+                                             (unsigned long long)g_fg_lvl_downs, (unsigned long long)g_fg_lvl_ups, fg_fixed() ? "DM_FRAMEGEN_SCALE's" : g_fg_budget_name[atomic_load(&g_fg_level)]);
             pthread_mutex_unlock(&g_pq_mu);
             g_fg_owing = 1; uint64_t p0 = now_ns(), a0 = g_present_alloc_wait_ns, r0 = g_present_res_ns;
             @autoreleasepool { present_now(&ow.t, 0, ow.frame, tk, ow.crop, update.drawable, update.targetPresentationTimestamp); }
@@ -16656,7 +16799,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
         g_fg_late++;
     }
     if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) {
-        if (g_dm_present_link && !g_rescue_mode) { g_link_empty++; if (!(g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol)) g_fg_starved = 1; }   // (FG_STEADY)
+        if (g_dm_present_link && !g_rescue_mode) { g_link_empty++; if (!(g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol)) g_fg_starved = 1; }   // (FG_AGAIN)
         pthread_mutex_unlock(&g_pq_mu); return; }
     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
@@ -16668,17 +16811,26 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     static int fifo = -1; if (fifo < 0) { const char *e = getenv("DM_PRESENT_FIFO"); fifo = !(e && !strcmp(e, "0")); MLOG("display link: %s", fifo ? "frames in order, at most one behind" : "the newest frame each tick (DM_PRESENT_FIFO=0)"); }
     if (fifo && ticket > first) ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
     pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;
-    {   // frame generation pauses while frames drop (FG_STEADY): this present came late, or a newer one waits
+    {   // frame generation while frames drop (FG_AGAIN): it never stops; frames dropping on and on make it lighter
         // Behind: older presents were dropped for this one. One newer present waiting is not: with snapshots the game runs a frame ahead of the screen, and taking that
         // as behind paused frame generation for 1,060 of about 2,900 presents of a run that dropped next to no frames (log 80)
         int behind = ticket > first, late = g_fg_starved, drop = behind || late; g_fg_starved = 0;
-        if (drop) { int again = g_fg_last_drop && ticket - g_fg_last_drop <= FG_AGAIN; g_fg_need = again ? FG_STEADY : 1; g_fg_last_drop = ticket;
-            if (again && fg_on() && !atomic_load(&g_fg_shed)) { atomic_store(&g_fg_shed, 1); if (g_fg_sheds++) g_fg_resume = MIN(g_fg_resume * 2, 60); g_fg_calm = 0;
-                MLOG("frame generation: frames keep dropping, the interpolation stops until %d presents in a row come in time (#%llu)", g_fg_resume, (unsigned long long)g_fg_sheds); } }
-        g_fg_steady = drop ? 0 : g_fg_steady + 1;
-        if (atomic_load(&g_fg_shed) && g_fg_steady >= g_fg_resume) { atomic_store(&g_fg_shed, 0); MLOG("frame generation: %d presents in time, the interpolation runs again", g_fg_steady); }
-        if (!drop && ++g_fg_calm >= 1800 && g_fg_resume > 30) { g_fg_resume = 30; g_fg_calm = 0; }
-        if (it.gen && g_fg_steady < g_fg_need) { it.gen = 0; if (behind) g_fg_paused_behind++; else g_fg_paused_late++; }
+        double ts = update.targetPresentationTimestamp, per = it.period > 0.025 ? it.period : 1 / 30.0;
+        int hitch = drop && g_fg_take_ts > 0 && ts - g_fg_take_ts >= FG_HITCH * per - tol; g_fg_take_ts = ts;   // (FG_HITCH)
+        if (hitch) { g_fg_drops++; g_fg_hitches++; g_fg_lvl_calm = 0; }
+        else if (drop) { int again = g_fg_last_drop && ticket - g_fg_last_drop <= FG_AGAIN; g_fg_last_drop = ticket; g_fg_lvl_calm = 0; g_fg_drops++;
+            if (again && fg_on()) {
+                if (fg_level_down()) {   // lighter (FG_LEVELS)
+                    if (g_fg_up_at && ticket - g_fg_up_at <= FG_UP_BACK) g_fg_up_need = MIN(g_fg_up_need * 2, FG_UP_CALM_MAX);
+                    g_fg_lvl_downs++; g_fg_last_drop = 0;   // the next drop counts as a lone one: the lighter frames get their chance
+                    MLOG("frame generation: frames keep dropping, its frames are made lighter: the %s pixel budget (step %d of %d; #%llu)", g_fg_budget_name[atomic_load(&g_fg_level)],
+                         atomic_load(&g_fg_level) + 1, FG_LEVELS, (unsigned long long)g_fg_lvl_downs);
+                } else { static uint64_t n; if (!(n++ % 100)) MLOG("frame generation: frames keep dropping at its lightest frames (the %s pixel budget); it keeps running, never falling back to 30 fps (%llu drops so far)",
+                                                                   fg_fixed() ? "DM_FRAMEGEN_SCALE's" : g_fg_budget_name[atomic_load(&g_fg_level)], (unsigned long long)g_fg_drops); } } }
+        if (!drop && atomic_load(&g_fg_level) > 0 && ++g_fg_lvl_calm >= (uint64_t)g_fg_up_need) {   // in time for long enough: a step back up
+            atomic_store(&g_fg_level, atomic_load(&g_fg_level) - 1); g_fg_lvl_calm = 0; g_fg_up_at = ticket; g_fg_lvl_ups++;
+            MLOG("frame generation: %d presents in a row in time, its frames back to the %s pixel budget (step %d of %d)", g_fg_up_need, g_fg_budget_name[atomic_load(&g_fg_level)], atomic_load(&g_fg_level) + 1, FG_LEVELS); }
+        if (it.gen && behind) { it.gen = 0; g_fg_paused_behind++; }   // the screen is behind: this present alone, its own picture
     }
     g_pq_read = ticket;
     if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
@@ -17028,20 +17180,38 @@ static id<MTL4FXFrameInterpolator> fg_for(id<MTLTexture> col) {
 // The size it works at follows a pixel budget: a picture shown with more than 1920x1080 pixels (Wide view's 2352x1080 on an iPhone, an iPad, an external screen) is copied that much
 // smaller, at least 0.75 of its shown size, and the present's bilinear pass brings it back to the shown size (MetalFX's spatial scaler only for DM_FRAMEGEN_SCALE, fx_mode). The interpolation's cost follows its
 // pixels: on an iPhone 18 Pro Max with Wide view its GPU time was 8-13 ms a generated frame (p50) at 2352x1080 against 5-10 ms at 1920x1080 (logs 7 and 9), enough with the game's own
-// 11-28 ms to drop frames and stop the interpolation nine times in five minutes. A 16:9 picture on a phone stays at its shown size. The launcher's Frame generation size row (Full / Lighter)
-// is gone: DM_FRAMEGEN_SCALE (0.5 to 1) remains, to measure, as a fixed factor in place of the budget
-enum { FG_BUDGET = 1920 * 1080 };
+// 11-28 ms to drop frames and stop the interpolation nine times in five minutes. The launcher's Frame generation size row (Full / Lighter) is gone: DM_FRAMEGEN_SCALE (0.5 to 1)
+// remains, to measure, as a fixed factor in place of the budget.
+// There is no budget at first (X9's picture as shown, Wide view's too; FF3 began at 1440x810 for the reason below) and steps down while frames keep dropping (g_fg_level,
+// fg_level_down): at 1920x1080 the interpolation took 5-10 ms of GPU time a generated frame
+// (p95 16 ms) on an iPhone where the game's own frame took 28-30 ms in Hyrule Field, and the two did not fit in 33 ms: frames dropped and the interpolation stopped 11 times
+// in two minutes, the picture switching between 60 and 30 each time (FF2, log 15; the same run without frame generation dropped next to none). Its cost follows its pixels,
+// so 1440x810 (0.75 of a 16:9 phone picture, 56 % of the pixels) costs about half. Its own pictures come from the same copy (fg_shown_size), so they are that size too, brought
+// back by the present's bilinear pass. Steps (g_fg_budget): as shown, 1920x1080, 1440x810, 1200x675, 960x540, never below 0.5 of the size shown
 static double fg_fixed(void) {   // DM_FRAMEGEN_SCALE, or 0 for the budget
     static double v = -1; if (v >= 0) return v;
     const char *e = getenv("DM_FRAMEGEN_SCALE"); double x = e && *e ? atof(e) : 0;
     v = !(e && *e) ? 0 : x >= 0.5 && x <= 1 ? x : 1;
     if (e && *e && v != x) MLOG("[RED] DM_FRAMEGEN_SCALE=%s: 0.5 to 1; using %.2f", e, v);
-    if (v) MLOG("frame generation: its frames at %.2f of the size shown (DM_FRAMEGEN_SCALE) in place of the 1920x1080 pixel budget", v);
+    if (v) MLOG("frame generation: its frames at %.2f of the size shown (DM_FRAMEGEN_SCALE) in place of the pixel budget", v);
     return v;
+}
+static double fg_size_at(double px, int level) {   // the budget's factor at a step for a picture of px pixels: within 10 % of the budget, as shown (not worth the pass)
+    double b = g_fg_budget[level < 0 ? 0 : level >= FG_LEVELS ? FG_LEVELS - 1 : level];
+    return px <= 1.1 * b ? 1 : fmax(0.5, sqrt(b / px));
 }
 static double fg_size_for(double w, double h) {   // the factor for a picture shown at w x h
     double f = fg_fixed(); if (f) return f;
-    double px = w * h; return px <= 1.1 * FG_BUDGET ? 1 : fmax(0.75, sqrt(FG_BUDGET / px));   // within 10 % of it (2144x984): as shown, not worth the scaler's pass
+    return fg_size_at(w * h, atomic_load(&g_fg_level));
+}
+// Frames keep dropping (the display link, under g_pq_mu): the next step of the budget that makes the last picture's frames smaller (steps that do not, as 1920x1080's for a
+// picture of that size, are passed over); 0 when there is none (the
+// interpolation then stays at its lightest and keeps running). The step is made from the next snapshot on (a new size starts the interpolation's history again: one present without a generated frame)
+static int fg_level_down(void) {
+    int l = atomic_load(&g_fg_level); double px = (double)atomic_load(&g_fg_shown_px);
+    if (fg_fixed() || !px) return 0;
+    for (int n = l + 1; n < FG_LEVELS; n++) if (fg_size_at(px, n) < fg_size_at(px, l)) { atomic_store(&g_fg_level, n); return 1; }
+    return 0;
 }
 static double fg_size(void) {   // the factor for the screen (the drawable), as fx_mode asks before the first picture: below 1 when frames may be made smaller than shown
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer(); CGSize ds = layer ? layer.drawableSize : CGSizeZero;
@@ -17051,8 +17221,10 @@ static int fg_shown_size(NSUInteger cw, NSUInteger ch, NSUInteger *tw, NSUIntege
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer(); if (!layer || !cw || !ch) return 0;
     CGSize ds = layer.drawableSize; if (ds.width < 16 || ds.height < 16) return 0;
     double s = fmin(fmin(ds.width / cw, ds.height / ch), 1);   // fitted into the drawable, as the present draws it; never larger than the crop
+    atomic_store(&g_fg_shown_px, (uint64_t)(cw * s * ch * s));
     double f = fg_size_for(cw * s, ch * s); s *= f;   // the pixel budget (or DM_FRAMEGEN_SCALE)
-    static double lf = -1; if (f != lf) { lf = f; if (f < 1) MLOG("frame generation: a picture shown at %.0fx%.0f is generated at %.2f of it (%lux%lu, the 1920x1080 pixel budget), brought back by the present", cw * s / f, ch * s / f, f, (unsigned long)lround(cw * s), (unsigned long)lround(ch * s)); }
+    static double lf = -1; if (f != lf) { lf = f; if (f < 1) MLOG("frame generation: a picture shown at %.0fx%.0f is generated at %.2f of it (%lux%lu; %s%s), brought back by the present", cw * s / f, ch * s / f, f, (unsigned long)lround(cw * s), (unsigned long)lround(ch * s),
+                                                       fg_fixed() ? "DM_FRAMEGEN_SCALE" : "pixel budget ", fg_fixed() ? "" : g_fg_budget_name[atomic_load(&g_fg_level)]); }
     if (!(s < 0.95) || s < 0.25) return 0;
     *tw = MAX((NSUInteger)lround(cw * s), 16); *th = MAX((NSUInteger)lround(ch * s), 16); return 1;
 }
@@ -17144,8 +17316,9 @@ static void fg_keep(id<MTL4CommandBuffer> cb, int k, int pk, id<MTLTexture> gen)
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch visibilityOptions:resource_vis()];   // after MetalFX's encoders
     [ce setArgumentTable:g_fgmv_args];
     fgmv_bind(ce, FGMV_STILL, col, prev, g_fg_still, nil); fgmv_grid(ce, g_fg_still.width, g_fg_still.height); fgmv_step(ce);
-    fgmv_bind(ce, FGMV_CONF, g_snap[k].lum, g_snap[pk].lum, g_fg_motion, g_fg_conf); fgmv_grid(ce, g_fg_conf.width, g_fg_conf.height); fgmv_step(ce);
-    fgmv_bind(ce, FGMV_HUD, g_fg_still, g_fg_keep, g_fg_conf, nil); fgmv_grid(ce, g_fg_keep.width, g_fg_keep.height); fgmv_step(ce);
+    // No patches from the present where the motion is not trusted (fgmv_conf, X13-FF3): its squares and half-shifted cells showed as blocks over the generated frame on camera
+    // turns, and X9, which pasted nothing, had the cleaner picture (the owner). The interpolator's own picture there; only the still HUD is kept
+    fgmv_bind(ce, FGMV_HUD, g_fg_still, g_fg_keep, nil, nil); fgmv_grid(ce, g_fg_keep.width, g_fg_keep.height); fgmv_step(ce);
     fgmv_bind(ce, FGMV_PSTILL, col, prev, prev2, g_fg_pmask); fgmv_grid(ce, col.width, col.height); fgmv_step(ce);
     fgmv_bind(ce, FGMV_KEEP, col, g_fg_keep, gen, g_fg_pmask); [g_fgmv_args setTexture:g_fg_motion.gpuResourceID atIndex:4]; fgmv_grid(ce, gen.width, gen.height);
     [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the present reads gen
@@ -17298,7 +17471,7 @@ static uint64_t snap_take(const tex_t *t, double period, const int crop[4], int 
         int pk = (int)((atomic_load(&g_snap_next) + (uint64_t)g_snap_n - 1) % (uint64_t)g_snap_n);
         g_snap[k].seq = g_fg_seq;
         if (fg_mv_on()) fg_luma(cb, k);
-        if (period > 0.025 && !atomic_load(&g_fg_shed)) fg_encode(cb, k, pk, period); else { g_fg_warm = 0; if (period > 0.025) g_fg_shed_frames++; }
+        if (period > 0.025) fg_encode(cb, k, pk, period); else g_fg_warm = 0;
     }
     [cb endCommandBuffer];
     MTL4CommitOptions *o = nil;

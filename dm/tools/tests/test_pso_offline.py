@@ -200,6 +200,68 @@ class Plan(unittest.TestCase):
         self.assertEqual(len(p[0]['color_attachments'][0]), 9)
 
 
+class Layouts(unittest.TestCase):
+    """Bases with a vertex layout (pso_layouts.tsv, pso_capture.py from a DM_PSO_CAPTURE run): read after the pair bases, checked against these libraries, compiled with their members"""
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp()) / f'b-{CHAIN}'; self.d.mkdir(); self.addCleanup(shutil.rmtree, self.d.parent)
+        (self.d / 'v_b.metallib').write_bytes(metallib([('main0', False), ('main0_z', False)]))
+        (self.d / 'f_b.metallib').write_bytes(metallib([('main0', False), ('main0_u', False)]))
+        (self.d / 'g_b.metallib').write_bytes(metallib([('main0', ('dm_border_off',))]))
+        (self.d / 'h_b.metallib').write_bytes(metallib([('main0', ('other_constant',))]))
+        self.vd = json.dumps({'input_primitive_topology': 'Triangle', 'vertex_descriptor': {'attributes': [{'format': 'Float4', 'buffer_index': 16}], 'layouts': [{}] * 16 + [{'stride': 16}]}},
+                             sort_keys=True, separators=(',', ':'))
+
+    def test_rows_read_checked_and_after_the_pairs(self):
+        rows = ['# header', f'v_b\tmain0\tf_b\tmain0\t{self.vd}', f'v_b\tmain0\tf_b\tmain0_u\t{self.vd}', f'v_b\tmain0\tf_b\tmain0\t{self.vd}',   # the repeat is read once
+                f'v_b\tmain0\tg_b\tmain0\t{self.vd}', f'v_b\tmain0\th_b\tmain0\t{self.vd}', f'x_b\tmain0\tf_b\tmain0\t{self.vd}', f'v_b\tmain9\tf_b\tmain0\t{self.vd}',
+                'v_b\tmain0\tf_b\tmain0', f'v_b\tmain0\tf_b\tmain0\t{{not json']
+        p = self.d.parent / 'pso_layouts.tsv'; p.write_text('\n'.join(rows) + '\n')
+        out, left = po.read_layouts(self.d, [str(p), str(self.d.parent / 'missing.tsv')])
+        self.assertEqual([b[:4] for b in out], [('v_b', 'main0', 'f_b', 'main0'), ('v_b', 'main0', 'f_b', 'main0_u'), ('v_b', 'main0', 'g_b', 'main0')])
+        self.assertEqual(left, {'library': 1, 'entry': 1, 'function constants': 1, 'malformed': 2})
+        again, _ = po.read_layouts(self.d, [str(p)], out[:1])   # one already among the bases is not read twice
+        self.assertEqual(len(again), 2)
+
+    def test_script_carries_the_layout(self):
+        j = po.script(self.d, [('v_b', 'main0', 'f_b', 'main0'), ('v_b', 'main0', 'g_b', 'main0', self.vd)])
+        p = j['pipeline_descriptors']['render_pipeline_descriptors']
+        self.assertNotIn('vertex_descriptor', p[0])   # a pair base: no layout
+        self.assertEqual(p[1]['vertex_descriptor']['attributes'], [{'format': 'Float4', 'buffer_index': 16}]); self.assertEqual(p[1]['input_primitive_topology'], 'Triangle')
+        self.assertTrue(all(v == 'Unspecialized' for a in p[1]['color_attachments'] for v in a.values()))
+        self.assertEqual(p[1]['fragment_function_descriptor'], 'fnd:g_b.main0.host')   # the border constant specialized as the host's prebuild does
+        self.assertEqual(po.library_digest(self.d, [('v_b', 'main0', 'g_b', 'main0', self.vd)]), po.library_digest(self.d, [('v_b', 'main0', 'g_b', 'main0')]))   # the same libraries
+
+    def test_capture_converts_to_rows(self):
+        cap = importlib.util.spec_from_file_location('pso_capture', REPO / 'dm/gfx/tools/pso_capture.py'); pc = importlib.util.module_from_spec(cap); cap.loader.exec_module(pc)
+        hv = hashlib.sha256((self.d / 'v_b.metallib').read_bytes()).hexdigest().upper(); hf = hashlib.sha256((self.d / 'f_b.metallib').read_bytes()).hexdigest().upper()
+        hg = hashlib.sha256((self.d / 'g_b.metallib').read_bytes()).hexdigest().upper()
+        unspec = [{'pixel_format': 'Unspecialized'}] * 8
+        doc = {'libraries': [{'label': hv, 'path': '_Path_not_available'}, {'label': hf, 'path': '_'}, {'label': hg, 'path': '_'}, {'label': 'F' * 64, 'path': '_'}],
+               'function_descriptors': {'library_function_descriptors': [{'label': 'A', 'name': 'main0', 'library': hv}, {'label': 'B', 'name': 'main0', 'library': hf},
+                                                                         {'label': 'C', 'name': 'main0', 'library': hg}, {'label': 'D', 'name': 'main0', 'library': 'F' * 64}],
+                                        'specialized_function_descriptors': [
+                                            {'label': 'C1', 'function_descriptor': 'fnd:C', 'constant_values': [{'id_type': 'FunctionConstantIndex', 'id': {'data': po.abi.BORDER_FC}, 'value_type': 'ConstantBool', 'value': {'data': True}}]},
+                                            {'label': 'C0', 'function_descriptor': 'fnd:C', 'constant_values': [{'id_type': 'FunctionConstantIndex', 'id': {'data': po.abi.BORDER_FC}, 'value_type': 'ConstantBool', 'value': {'data': False}}]}]},
+               'pipeline_descriptors': {'render_pipeline_descriptors': [
+                   {'vertex_function_descriptor': 'fnd:A', 'fragment_function_descriptor': 'fnd:B', 'vertex_descriptor': json.loads(self.vd)['vertex_descriptor'], 'input_primitive_topology': 'Triangle', 'color_attachments': unspec},
+                   {'vertex_function_descriptor': 'fnd:A', 'fragment_function_descriptor': 'fnd:C1', 'vertex_descriptor': {'attributes': [{'format': 'Half2'}]}, 'raster_sample_count': 4, 'color_attachments': unspec},
+                   {'vertex_function_descriptor': 'fnd:A', 'fragment_function_descriptor': 'fnd:C0', 'vertex_descriptor': {'attributes': [{'format': 'Half2'}]}, 'color_attachments': unspec},
+                   {'vertex_function_descriptor': 'fnd:A', 'fragment_function_descriptor': 'fnd:B', 'color_attachments': unspec},
+                   {'vertex_function_descriptor': 'fnd:A', 'fragment_function_descriptor': 'fnd:B', 'vertex_descriptor': {'attributes': [{'format': 'Float'}]}, 'color_attachments': [{'pixel_format': 'RGBA8Unorm'}] + unspec[1:]},
+                   {'vertex_function_descriptor': 'fnd:A', 'fragment_function_descriptor': 'fnd:D', 'vertex_descriptor': {'attributes': [{'format': 'Float'}]}, 'color_attachments': unspec},
+                   {'vertex_function_descriptor': 'fnd:A', 'vertex_descriptor': {'attributes': [{'format': 'Float'}]}, 'rasterization_enabled': False, 'color_attachments': unspec}]}}
+        s = self.d.parent / 'cap'; s.mkdir(); (s / '00000-7.mtl4-json').write_text(json.dumps(doc))
+        rows, left = pc.convert(sorted(s.glob('*.mtl4-json')), self.d)
+        self.assertEqual([r[:4] for r in rows], [('v_b', 'main0', 'f_b', 'main0'), ('v_b', 'main0', 'g_b', 'main0')])
+        self.assertEqual(json.loads(rows[0][4]), json.loads(self.vd)); self.assertEqual(json.loads(rows[1][4])['raster_sample_count'], 4)
+        self.assertEqual(dict(left), {'other function constants': 1, 'no vertex layout (a pair base)': 1, 'colour attachments specialized': 1,
+                                      'library not among the Mac libraries': 1, 'no fragment function': 1})
+        out = self.d.parent / 'layouts.tsv'
+        self.assertEqual(pc.main(['--capture', str(s), '--msl', str(self.d), '--out', str(out)]), 0)
+        read, rl = po.read_layouts(self.d, [str(out)])   # what it writes, pso_offline reads back whole
+        self.assertEqual(len(read), 2); self.assertEqual(sum(rl.values()), 0)
+
+
 class Compute(unittest.TestCase):
     """The compute pipelines: every compute shader of the shader map after the prewarm list's C rows, each from its function alone"""
     d: Path   # Plan.setUp's folder
@@ -697,7 +759,7 @@ class Build(unittest.TestCase):
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
 
-    def step(self, python):
+    def step(self, python, after=''):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
         i = next(n for n, ln in enumerate(lines) if ln.startswith('if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ]'))
         j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('else [ "$GFXAPI" != nvn ]'))
@@ -705,7 +767,7 @@ class IpaFallback(unittest.TestCase):
             (Path(d) / 'bin').mkdir(); stub = Path(d) / 'bin/python3'; stub.write_text('#!/bin/sh\n' + python); stub.chmod(0o755)
             (Path(d) / 'shader_pairs.tsv').write_text('v\tf\n')
             env = dict(os.environ, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn')
-            script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\necho went on\n'
+            script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\necho went on\n' + after
             return subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True, text=True).stdout
 
     def test_failed_archive_is_a_warning(self):
@@ -715,7 +777,19 @@ class IpaFallback(unittest.TestCase):
 
     def test_made_archive_goes_into_the_app(self):
         out = self.step('mkdir -p "$W/build/ios/pso/bundle"; exit 0\n')
-        self.assertNotIn('[RED]', out); self.assertIn('/build/ios/pso/bundle]', out); self.assertIn('folder', out)
+        self.assertNotIn('[RED]', out); self.assertNotIn('FAIL', out); self.assertIn('/build/ios/pso/app]', out); self.assertIn('folder', out); self.assertIn('went on', out)
+
+    def test_archive_goes_in_without_its_mach_o_magic(self):
+        """LiveContainer signs every Mach-O of an app it installs and failed on the archive: the app carries <gpu>.mtl4x, DMPA over the magic, the other files as they are"""
+        made = ('mkdir -p "$W/build/ios/pso/bundle"; printf "\\317\\372\\355\\376rest" > "$W/build/ios/pso/bundle/applegpu_g18p.mtl4a"; '
+                'echo stamp > "$W/build/ios/pso/bundle/prebuilt.tsv"; exit 0\n')
+        check = ('echo "head=[$(head -c 8 "$W/build/ios/pso/app/applegpu_g18p.mtl4x")]"; echo "app=[$(ls "$W/build/ios/pso/app" | tr "\\n" " ")]"\n'
+                 'echo "made=[$(head -c 4 "$W/build/ios/pso/bundle/applegpu_g18p.mtl4a" | od -An -tx1 | tr -s " ")]"\n')
+        out = self.step(made, after=check)
+        self.assertNotIn('FAIL', out); self.assertIn('/build/ios/pso/app]', out)
+        self.assertIn('head=[DMPArest]', out)   # the magic replaced, the rest as made
+        self.assertIn('app=[applegpu_g18p.mtl4x prebuilt.tsv ]', out)   # no .mtl4a in the app, the stamp beside it
+        self.assertIn('made=[ cf fa ed fe ]', out)   # the archive the build made keeps its magic: the app's file is a clone
 
 
 class Default(unittest.TestCase):

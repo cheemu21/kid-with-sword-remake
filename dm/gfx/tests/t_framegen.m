@@ -63,8 +63,8 @@ static uint64_t tick(void) {   // one 60 Hz tick of the display link; returns th
     g_tick_ms = (now_ns() - t0) / 1e6;
     return g_present_n != n ? g_present_ser : 0;
 }
-// A case starts with no drop history (the cases before it make the link wait on purpose, which would stop the interpolation for the ones after)
-static void calm(void) { pthread_mutex_lock(&g_pq_mu); atomic_store(&g_fg_shed, 0); g_fg_last_drop = 0; g_fg_need = 1; g_fg_resume = 30; pthread_mutex_unlock(&g_pq_mu); }
+// A case starts with no drop history (the cases before it make the link wait on purpose, which would count as frames dropping on and on for the ones after)
+static void calm(void) { pthread_mutex_lock(&g_pq_mu); g_fg_last_drop = 0; pthread_mutex_unlock(&g_pq_mu); }
 // n presents from frame i0 at 30 fps on the link's 60 Hz ticks (two ticks each)
 static void steady(int i0, int n) { for (int i = 0; i < n; i++) { tex_t t = frame(i0 + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); tick(); tick(); } }
 // "t_framegen size": DM_FRAMEGEN_SCALE=0.5 (the launcher's Frame generation size), fixed for the process: the snapshots and generated frames at half the shown size, still
@@ -170,11 +170,16 @@ int main(int argc, char **argv) { @autoreleasepool {
     g_test_layer = [CAMetalLayer layer]; g_test_layer.device = g_dev; g_test_layer.drawableSize = CGSizeMake(W, H); g_test_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     mtl_present_screen(W, H); mtl_present_layer(W, H);   // the picture's shape, as a front end reports it
     CHECK("frame generation on", fg_on());
-    // the pixel budget (no DM_FRAMEGEN_SCALE in this mode): a 16:9 phone picture as shown, Wide view's and an iPad's smaller, never below 0.75
-    CHECK("budget: 1920x1080 is generated as shown", fg_size_for(1920, 1080) == 1);
-    CHECK("budget: 2144x984, within 10 % of it, as shown", fg_size_for(2144, 984) == 1);
-    CHECK("budget: Wide view's 2352x1080 at about 0.90", fabs(fg_size_for(2352, 1080) - 0.904) < 0.005);
-    CHECK("budget: an iPad's 2732x2048 at 0.75, the floor", fg_size_for(2732, 2048) == 0.75);
+    // the pixel budget (no DM_FRAMEGEN_SCALE in this mode): none at its first step (X9's picture as shown, Wide view's and an iPad's too); 1920x1080 at the second, where
+    // Wide view's and an iPad's are smaller, never below 0.5; a picture within 10 % of a step's budget as shown
+    CHECK("budget: 1920x1080 as shown", fg_size_for(1920, 1080) == 1);
+    CHECK("budget: 1280x720, under it, as shown", fg_size_for(1280, 720) == 1);
+    CHECK("budget: 1500x830, within 10 % of it, as shown", fg_size_for(1500, 830) == 1);
+    CHECK("budget: Wide view's 2352x1080 as shown at first", fg_size_for(2352, 1080) == 1);
+    CHECK("budget: an iPad's 2732x2048 as shown at first", fg_size_for(2732, 2048) == 1);
+    CHECK("budget steps: Wide view's 2352x1080 at about 0.90 on the second", fabs(fg_size_at(2352 * 1080, 1) - 0.904) < 0.005);
+    CHECK("budget steps: 1920x1080 as shown on the second, 0.75 on the third, 0.625 on the fourth, 0.5 on the fifth", fg_size_at(1920 * 1080, 1) == 1 && fabs(fg_size_at(1920 * 1080, 2) - 0.75) < 1e-9 && fabs(fg_size_at(1920 * 1080, 3) - 0.625) < 1e-9 && fabs(fg_size_at(1920 * 1080, 4) - 0.5) < 1e-9);
+    CHECK("budget steps: Wide view's floor on the fifth", fg_size_at(2352 * 1080, 4) == 0.5);
     CHECK("snapshots on with a ring of 3", mtl_snap_on() && g_snap_n == 3);
     // The present thread takes the presents (no display link): each slot's generated frame against the presents before
     int ok[6];
@@ -193,22 +198,22 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK("none for a present of one tick", !g_snap[last_slot()].gen_ok && !g_pq[(g_pq_in - 1) % PQ].gen);
     for (int i = 7; i < 10; i++) { tex_t t = frame(i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); mtl_present_flush(); copied(); ok[i - 7] = g_snap[last_slot()].gen_ok; }
     CHECK("after it, the history starts again", !ok[0] && !ok[1] && ok[2]);
-    // The display link at 30 fps on 60 Hz ticks: the generated frame on the present's first tick, its own picture on the second. Frame generation pauses while frames drop:
-    // a present the link waited for (a tick found nothing new to show) or one taken while a newer one waits shows its own picture, until three have come in time
+    // The display link at 30 fps on 60 Hz ticks: the generated frame on the present's first tick, its own picture on the second. Frame generation never falls back to 30:
+    // a present the link waited for (a tick found nothing new to show) shows its generated frame first all the same
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; pthread_mutex_unlock(&g_pq_mu);
     g_dm_present_link = 1; g_link_started = 1;   // no link object: the ticks below are the link's
     for (int i = 0; i < 4; i++) tick();
     CHECK("the link's tick interval is known", fabs(g_fg_tick - 1 / 60.0) < 1e-4);
-    int order = 1, paused = 1;
-    for (int i = 10; i < 16; i++) {   // (10 to 15: a lone drop's pause, FG_AGAIN presents before the late case below)
+    int order = 1, waited = 1;
+    for (int i = 10; i < 16; i++) {   // (10 came after ticks with nothing to show)
         tex_t t = frame(i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied();
         int k = last_slot(); uint64_t gen = g_snap[k].gen_ok ? g_snap[k].gen_serial : 0, own = g_snap[k].serial;
         uint64_t a = tick(), b = tick();
         printf("present %d: ticks showed %llx %llx (generated %llx, own %llx)\n", i, (unsigned long long)a, (unsigned long long)b, (unsigned long long)gen, (unsigned long long)own);
-        if (i < 11) paused &= a == own && !b;   // 10 came after ticks with nothing to show: a lone drop pauses only it
+        if (i < 11) waited &= gen && a == gen && b == own;
         else order &= gen && a == gen && b == own;
     }
-    CHECK("after the link waited for a present, its own picture, then generated frames again", paused);
+    CHECK("after the link waited for a present, its generated frame first all the same", waited);
     CHECK("each present in time: its generated frame, then its own picture", order);
     CHECK("then held", !tick());
     // A tick missed after the generated frame: once the interval is over and the next present waits, that one is shown, not the stale picture
@@ -223,15 +228,15 @@ int main(int argc, char **argv) { @autoreleasepool {
     tex_t t3 = frame(16); present_enqueue(&t3, 1 / 60.0, NULL, 0, NULL); copied();
     uint64_t own = g_snap[last_slot()].serial;
     CHECK("a present of one tick shows its own picture", tick() == own && !tick());
-    // A present that comes late (the link shows nothing new on a tick past its interval) within FG_AGAIN presents of the drop before: its own picture, and so for the next
-    // ones until three have come in time, and the interpolation stops (a second drop within FG_AGAIN)
+    // A present that comes late (the link shows nothing new on a tick past its interval) within FG_AGAIN presents of the drop before: generated frames go on, for it and
+    // the ones after (X6-FF2 showed their own pictures and stopped the interpolation: the picture switched to 30)
     calm(); steady(30, 4); g_fg_last_drop = g_pq_in; tick();   // in time (a drop just before, so the late one below is soon after it), then a tick with nothing new
-    uint64_t late_show[4], late_own[4], late_gen[4];
+    uint64_t late_show[4], late_gen[4]; int late_ok = 1;
     for (int i = 0; i < 4; i++) { tex_t t = frame(34 + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied();
-        late_own[i] = g_snap[last_slot()].serial; late_gen[i] = g_snap[last_slot()].gen_ok ? g_snap[last_slot()].gen_serial : 0; late_show[i] = tick(); tick(); }
-    printf("after a late present the first ticks showed: %s %s %s %s\n", late_show[0] == late_own[0] ? "own" : "?", late_show[1] == late_own[1] ? "own" : "?",
-           late_show[2] == late_own[2] ? "own" : "?", late_show[3] == late_own[3] ? "own" : late_show[3] == late_gen[3] ? "generated" : "?");
-    CHECK("a late present soon after another stops the interpolation: its own pictures", late_show[0] == late_own[0] && late_show[1] == late_own[1] && late_show[2] == late_own[2] && late_show[3] == late_own[3] && atomic_load(&g_fg_shed));
+        late_gen[i] = g_snap[last_slot()].gen_ok ? g_snap[last_slot()].gen_serial : 0; late_show[i] = tick(); tick(); late_ok &= late_gen[i] && late_show[i] == late_gen[i]; }
+    printf("after a late present the first ticks showed: %s %s %s %s\n", late_show[0] == late_gen[0] ? "generated" : "?", late_show[1] == late_gen[1] ? "generated" : "?",
+           late_show[2] == late_gen[2] ? "generated" : "?", late_show[3] == late_gen[3] ? "generated" : "?");
+    CHECK("a late present soon after another: generated frames go on", late_ok);
     // One newer present waiting is the game running a frame ahead (snapshots): generated frames go on. Three waiting: the oldest is dropped, and the one taken shows its
     // own picture, as does the next
     calm(); steady(44, 3);
@@ -248,20 +253,38 @@ int main(int argc, char **argv) { @autoreleasepool {
     printf("three waiting: ticks showed %llx then %llx (own %llx, %llx)\n", (unsigned long long)sc2, (unsigned long long)sc3, (unsigned long long)own_c2, (unsigned long long)own_c3);
     // (c3's ring slot is still held, so it is shown from the game's own texture)
     CHECK("an older present dropped: the one taken and the next show their own pictures", sc2 == own_c2 && (sc3 == own_c3 || sc3 == c3.serial) && g_fg_paused_behind == behind0 + 1);
-    // Frames dropping on and on: two late presents within FG_AGAIN stop the interpolation itself (no generated frame is made), until g_fg_resume presents in a row come in time:
-    // 30, and on repeats 60 at most (X12 doubled it up to 300)
+    // Frames dropping on and on (late presents, one after another, on a picture no step makes smaller): the interpolation keeps running and every present shows its
+    // generated frame first (X6-FF2 stopped it for 30-60 presents: the picture switched between 60 and 30)
     calm(); steady(50, 4);
-    for (int i = 0; i < 2; i++) { tick(); tex_t t = frame(54 + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); tick(); tick(); }   // a tick with nothing new, then a present: late, twice
-    CHECK("frames dropping on and on stop the interpolation", atomic_load(&g_fg_shed) == 1);
-    { uint64_t s0 = g_fg_sheds; g_fg_sheds = 5; int r0 = g_fg_resume; atomic_store(&g_fg_shed, 0); g_fg_resume = 60; g_fg_last_drop = g_pq_in;   // a repeat stop at the cap
-      tick(); { tex_t t = frame(56); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); tick(); tick(); }
-      CHECK("a repeat stop waits 60 presents at most", atomic_load(&g_fg_shed) == 1 && g_fg_resume == 60); g_fg_sheds = s0; (void)r0; }
-    { tex_t t = frame(57); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); tick(); tick(); }
-    CHECK("while stopped, no generated frame is made", !g_snap[last_slot()].gen_ok);
-    int resumed = 0, made = 0;
-    for (int i = 0; i < g_fg_resume + 6; i++) { tex_t t = frame(58 + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); if (!atomic_load(&g_fg_shed)) resumed = 1; if (g_snap[last_slot()].gen_ok) made = 1; tick(); tick(); }
-    printf("interpolation stopped %llu times; resumed %d, generated again %d (after %d presents in time)\n", (unsigned long long)g_fg_sheds, resumed, made, g_fg_resume);
-    CHECK("it runs again after presents in time", resumed && made);
+    int kept = 1;
+    for (int i = 0; i < 8; i++) { tick(); tex_t t = frame(54 + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied();   // a tick with nothing new, then a present: late, eight times
+        uint64_t gen = g_snap[last_slot()].gen_ok ? g_snap[last_slot()].gen_serial : 0, a = tick(); tick(); kept &= gen && a == gen; }
+    CHECK("frames dropping on and on: the interpolation keeps running, generated frames shown", kept);
+    // A picture past the pixel budget (a phone's 1920x1080; set after each snapshot, as this test's pictures are small): frames dropping on and on make its frames lighter,
+    // a step of the budget each time, and past the last step it stays there, still running. Presents in time long enough take a step back up, and a step down soon after
+    // a step up doubles how long that takes
+    {   uint64_t big = 1920 * 1080; int up0 = g_fg_up_need;
+        atomic_store(&g_fg_level, 0); g_fg_lvl_calm = 0; g_fg_up_at = 0;
+        #define LATE2(i0, px) for (int i = 0; i < 2; i++) { tick(); tex_t t = frame((i0) + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); atomic_store(&g_fg_shown_px, (px)); tick(); tick(); }
+        calm(); steady(70, 4); LATE2(74, big);
+        int l1 = atomic_load(&g_fg_level);
+        LATE2(76, big); int l2 = atomic_load(&g_fg_level);
+        LATE2(78, big); int l3 = atomic_load(&g_fg_level);
+        LATE2(66, big); int l4 = atomic_load(&g_fg_level);
+        { tex_t t = frame(79); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); tick(); tick(); }
+        tex_t t5 = frame(80); present_enqueue(&t5, 1 / 30.0, NULL, 0, NULL); copied(); int still_made = g_snap[last_slot()].gen_ok; tick(); tick();
+        printf("frames dropping on a 1920x1080 picture: step %d, step %d, step %d, step %d; generated frames still made %d\n", l1 + 1, l2 + 1, l3 + 1, l4 + 1, still_made);
+        CHECK("frames dropping on and on make the frames lighter (1920x1080's step, no smaller for this picture, passed over), and past the last step it keeps running", l1 == 2 && l2 == 3 && l3 == 4 && l4 == 4 && still_made);
+        calm(); g_fg_up_need = 4; g_fg_lvl_calm = 0; steady(80, 5);
+        int lu = atomic_load(&g_fg_level); uint64_t up_at = g_fg_up_at;
+        CHECK("presents in time take a step back up", lu == 3 && up_at);
+        LATE2(85, big); LATE2(87, big);
+        CHECK("a step down soon after a step up doubles the calm it takes to go up again", atomic_load(&g_fg_level) == 4 && g_fg_up_need == 8);
+        calm(); steady(89, 3); atomic_store(&g_fg_level, 0);
+        LATE2(92, (uint64_t)W * H);
+        CHECK("a picture under the budget: no step makes it smaller, the interpolation keeps running", atomic_load(&g_fg_level) == 0 && g_snap[last_slot()].gen_ok);
+        #undef LATE2
+        atomic_store(&g_fg_level, 0); g_fg_up_need = up0; g_fg_lvl_calm = 0; g_fg_up_at = 0; calm(); }
     // The picture after a generated frame while the GPU has not run that frame (a long frame, a load): it does not wait on the display link thread for the generated frame's
     // allocator, which held the link silent until its rescue (a Mac run while loading)
     calm(); steady(17, 3);
