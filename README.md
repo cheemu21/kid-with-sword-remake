@@ -140,6 +140,15 @@ This project is built on other people's work ([licenses](dm/third_party/README.m
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
 - **[glslang](https://github.com/KhronosGroup/glslang)** compiles the GLSL of OpenGL games to SPIR-V for it.
 - **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): the GPU widening of 8-bit indices and in-pass clears in `dm/gfx/nvn/nvn_mtl.m`, and the visibility-counter lowering in the shader translator.
+- **Apple's [MetalFX](https://developer.apple.com/documentation/metalfx)**: the spatial and temporal scalers, and the frame interpolator behind frame generation.
+- **[Hookshot](https://github.com/NotRexed/Hookshot)** by NotRexed: the idea of frame generation for Ocarina of Time. No code was taken (Hookshot is GPL-3.0).
+
+This fork's Ocarina of Time builds (the FF line on the current nxnative main, and the X line before it) also carry work by these people ([what each made](https://github.com/cheemu21/kid-with-sword-remake/blob/kid-with-sword-remake/docs/games/kid-with-sword-remake.md#credits)):
+- **seedds** (nxnative itself, and the current nxnative main the FF builds start from);
+- **ChiefSZ13** (the game's profile and bring-up);
+- **Pedro Nascimento (lunks)**, **Xipzer**, **nanotchec**, **Adrian Smith**, **Romen Adama Caetano Ramírez**, **Travis (travislikestocode)**, **David Lepe**;
+- **vladbondarenko97**, **uncraftablexd**, **mmkzer0**, **Nimesh Ambepitiya**, **MetaIX**, **TheGoldfish11**, **Oliver Ames**, **David Padron-Harris**, **zatteogit**, **tut**;
+- the author of the oot2 branch, and a contributor who signed only as "contributor".
 
 ## License
 
