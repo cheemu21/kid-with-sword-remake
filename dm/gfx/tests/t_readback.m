@@ -79,7 +79,14 @@ static void readback_pool(void) { @autoreleasepool {
     mrbuf_put(again); mrbuf_put(next);
     id<MTLBuffer> big[3]; for (int i = 0; i < 3; i++) big[i] = mrbuf_get(8u << 20);
     for (int i = 0; i < 3; i++) mrbuf_put(big[i]);
-    EXPECT("at most 16 MB of readback buffers kept", 1, g_mrbuf_bytes <= (16u << 20) && g_mrbuf_n == 3);
+    int newest = 0; for (int i = 0; i < g_mrbuf_n; i++) newest |= g_mrbuf[i] == big[2];
+    EXPECT("at most 16 MB of readback buffers kept, the oldest out first", 1, g_mrbuf_bytes <= (16u << 20) && g_mrbuf_n == 2 && newest);
+    readback_pool_drop();
+    // a list full of one size still takes a new one: kept buffers of sizes no longer read back filled it for good, and a new size was made and dropped at every readback
+    id<MTLBuffer> fill[16]; for (int i = 0; i < 16; i++) fill[i] = mrbuf_get(4096);
+    for (int i = 0; i < 16; i++) mrbuf_put(fill[i]);
+    id<MTLBuffer> half = mrbuf_get(512u << 10); mrbuf_put(half);
+    EXPECT("a new size is kept when the list is full", 1, g_mrbuf_n == 16 && mrbuf_get(512u << 10) == half);
     readback_pool_drop();
 } }
 static void *readback_guest_waiter(void *arg) {

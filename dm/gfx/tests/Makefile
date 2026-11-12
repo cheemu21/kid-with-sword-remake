@@ -282,6 +282,8 @@ t_ubdc: t_ubdc.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ubdc.m $(MTL_T_SRC) $(FW)
 t_ubp_running: t_ubp_running.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ubp_running.m $(MTL_T_SRC) $(FW)
+t_ubc_wait: t_ubc_wait.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ubc_wait.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_ubp_running
 check_t_ubp_running: t_ubp_running
 	./t_ubp_running

@@ -2,6 +2,7 @@
 // is centered (black bars) and the controls are drawn over it; in portrait, or on an iPhone Duo half folded, the picture sits above the controls. With a TV connected the Metal view
 // is on the TV and the phone shows the pad (DmTVSceneDelegate).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
+#import "mic_apple.h"
 #import <UIKit/UIKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -482,7 +483,13 @@ void front_save_failed(int err) {
 static int g_session_off;   // the last activation failed (another app or a call still held the session): tried again when the app becomes active
 void front_ios_audio_session(void) {
     AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
-    if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) LOG("[RED] audio session category could not be set: %s", e.localizedDescription.UTF8String);
+    // With the microphone offered to the game (DM_MIC, mic_apple.m) the category is PlayAndRecord, set here at boot so the game's sound does not change mid-play: the loudspeaker stays
+    // the output (not the receiver), Bluetooth headphones keep their music profile (A2DP; the hands-free profile would take their quality), and the silent switch still does not mute it
+    if (dm_mic_wanted()) {
+        if (![s setCategory:AVAudioSessionCategoryPlayAndRecord withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetoothA2DP error:&e])
+            LOG("[RED] audio session category (play and record, for the microphone) could not be set: %s", e.localizedDescription.UTF8String);
+        dm_mic_prepare();
+    } else if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) LOG("[RED] audio session category could not be set: %s", e.localizedDescription.UTF8String);
     [s setPreferredSampleRate:48000 error:nil];
     if (![s setPreferredIOBufferDuration:0.005 error:&e]) LOG("[RED] audio session I/O buffer duration could not be set: %s", e.localizedDescription.UTF8String);
     g_session_off = ![s setActive:YES error:&e];

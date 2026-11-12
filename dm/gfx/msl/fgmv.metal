@@ -123,16 +123,76 @@ kernel void fgmv_still(texture2d<float, access::read> cur [[texture(0)]], textur
     half v = d <= 2.5h / 255 ? (hi - lo > 0.08 ? 2.0h : 1.0h) : 0.0h;
     st.write(half4(v), g);
 }
-kernel void fgmv_hud(texture2d<half, access::read> st [[texture(0)]], texture2d<half, access::write> keep [[texture(1)]], uint2 g [[thread_position_in_grid]]) {
+#define FGMV_FLOOR 0.03f   // a mean luma difference over 3x3 under which what the motion leaves is not looked at
+#define FGMV_BAD 0.5f   // the part of the change left unexplained past which a 1/8 pixel's motion is not trusted (fgmv_conf)
+// fgmv_conf: per 1/8 pixel, how badly the motion picked for it explains the change (fgmv_cost of its vector). Where no vector does (an object moving its own way,
+// what it uncovers, motion past the search), MetalFX smears or tears: there fgmv_hud keeps the present's own pixels, a small area at 30 frames a second instead of a
+// guessed picture (t_framegen stab: an object moving against the pan)
+kernel void fgmv_conf(texture2d<half, access::read> cur [[texture(0)]], texture2d<half, access::sample> prev [[texture(1)]], texture2d<half, access::read> mot [[texture(2)]],
+                      texture2d<half, access::write> conf [[texture(3)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= conf.get_width() || g.y >= conf.get_height()) return;
+    int2 mx = int2(cur.get_width() - 1, cur.get_height() - 1);
+    float2 inv = 1.0f / float2(prev.get_width(), prev.get_height());
+    // Not trusted: the motion leaves a visible change (past FGMV_FLOOR) that is a large part of the change with no motion at all. Not an absolute cost alone: a correctly
+    // tracked detailed picture costs as much as a mismatch elsewhere (at 0.045, 7-14 % of a correctly panning scene was held at 30 fps, t_framegen stab)
+    float2 v = float2(mot.read(g).xy);
+    float cv = fgmv_cost(cur, prev, int2(g), v, inv, mx), c0 = fgmv_cost(cur, prev, int2(g), 0, inv, mx);
+    float r = cv > FGMV_FLOOR ? cv / max(c0, 1e-4f) : 0.0f;
+    // Motion its neighbours share (each 2 apart within a third of its length and one 1/8 pixel: a camera turn moves near ground faster than far, and the 1/8 search's tile vectors
+    // jump by a 1/8 pixel or two between tiles) is a camera turn or a body moving whole: what the vector leaves there is detail and depth the tile vectors cannot follow, and the
+    // present's own pixels in its place, unmoved, were blocks half a step behind the picture around them at 30 fps, the texture artifacts of a camera turn in X13. Written negative: fgmv_keep moves the present's pixels there half the step. Motion of its own (a character moving its own way,
+    // what it uncovers, the edge new picture enters by) stays positive: the present's own pixels, unmoved, as X13
+    if (r > FGMV_BAD) {
+        int2 cm = int2(mot.get_width() - 1, mot.get_height() - 1); int shared = 1;
+        for (int y = -2; y <= 2 && shared; y += 2) for (int x = -2; x <= 2; x += 2) {
+            float2 n = float2(mot.read(uint2(clamp(int2(g) + int2(x, y), int2(0), cm))).xy);
+            if (length(n - v) > 1.0f + length(v) / 3) { shared = 0; break; }
+        }
+        if (shared) r = -r;
+    }
+    conf.write(half4(half(r)), g);
+}
+kernel void fgmv_hud(texture2d<half, access::read> st [[texture(0)]], texture2d<half, access::write> keep [[texture(1)]], texture2d<half, access::read> conf [[texture(2)]],
+                     uint2 g [[thread_position_in_grid]]) {
     if (g.x >= keep.get_width() || g.y >= keep.get_height()) return;
     int2 mx = int2(st.get_width() - 1, st.get_height() - 1), gi = int2(g);
     half k = 0;
-    if (st.read(g).r > 0.5h)
-        for (int y = -3; y <= 3 && k == 0; y++) for (int x = -3; x <= 3; x++) if (st.read(uint2(clamp(gi + int2(x, y), int2(0), mx))).r > 1.5h) { k = 1; break; }
+    // A block within one 1/8 pixel of motion of its own not trusted (fgmv_conf positive: a model moving its own way on a camera turn, what it uncovers): the present's own (1), over
+    // the 24x24 around it as in X13, so a model is taken whole from one moment. Cut to the 1/8 pixel alone, parts of a model came from the present and the cells beside them from the
+    // interpolation, and models twitched on camera turns (X14's first builds, the owner). Motion its neighbours share (negative: detail of the ground the camera turns over), in this
+    // 1/8 pixel alone: the present's own moved half its step (0.5, fgmv_keep), where X13's unmoved squares were the patches of texture on a camera turn
+    if (conf.get_width() > 1) {
+        int2 cm = int2(conf.get_width() - 1, conf.get_height() - 1), c = gi / 2;
+        for (int y = -1; y <= 1 && k < 1.0h; y++) for (int x = -1; x <= 1; x++) if (float(conf.read(uint2(clamp(c + int2(x, y), int2(0), cm))).r) > FGMV_BAD) { k = 1; break; }
+        if (k < 1.0h && float(conf.read(uint2(clamp(c, int2(0), cm))).r) < -FGMV_BAD) k = 0.5h;
+    }
+    if (k < 1.0h && st.read(g).r > 0.5h)
+        for (int y = -3; y <= 3 && k < 1.0h; y++) for (int x = -3; x <= 3; x++) if (st.read(uint2(clamp(gi + int2(x, y), int2(0), mx))).r > 1.5h) { k = 1; break; }
     keep.write(half4(k), g);
 }
-kernel void fgmv_keep(texture2d<float, access::read> cur [[texture(0)]], texture2d<half, access::read> keep [[texture(1)]], texture2d<float, access::write> out [[texture(2)]],
-                      uint2 g [[thread_position_in_grid]]) {
+// fgmv_pstill: per pixel, 1 where it did not change across the last three presents (no channel by more than 2/255 from the present before, nor that one from the one
+// before it). A HUD drawn over a moving picture, a half-transparent panel with text on it, has no still 4x4 block: its text moved with the picture behind it, with 10-20
+// times the error of the rest (t_framegen stab: 0.031 at 24 px a frame, 0.096 at 96). Three presents, not two, so a moving picture matching by chance is rare; where it
+// does, a smooth area, the present's own pixel is next to what the interpolation would give. prev2 is prev when there is no present before it
+kernel void fgmv_pstill(texture2d<float, access::read> cur [[texture(0)]], texture2d<float, access::read> prev [[texture(1)]], texture2d<float, access::read> prev2 [[texture(2)]],
+                        texture2d<half, access::write> m [[texture(3)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= m.get_width() || g.y >= m.get_height()) return;
+    float3 a = cur.read(g).rgb, b = prev.read(g).rgb, c = prev2.read(g).rgb;
+    float3 d = max(fabs(a - b), fabs(b - c));
+    m.write(half4(max(d.x, max(d.y, d.z)) <= 2.5f / 255 ? 1.0h : 0.0h), g);
+}
+// keep 1 (a HUD, still pixels) and the three-present still mask: the present's own pixel. keep 0.5 (motion not trusted, fgmv_conf): the present's picture moved half the block's
+// step back towards the previous one, where it is at the generated frame's moment: the motion v takes a pixel of the present to the previous picture (fgmv_pick), so the frame between
+// shows at p what the present has at p - v/2. Shown unmoved, those blocks were half a step behind the picture around them, at 30 fps: blocks of texture that lagged on a camera turn (X13)
+kernel void fgmv_keep(texture2d<float, access::sample> cur [[texture(0)]], texture2d<half, access::read> keep [[texture(1)]], texture2d<float, access::write> out [[texture(2)]],
+                      texture2d<half, access::read> pm [[texture(3)]], texture2d<half, access::read> mot [[texture(4)]], uint2 g [[thread_position_in_grid]]) {
     if (g.x >= out.get_width() || g.y >= out.get_height()) return;
-    if (keep.read(min(g / 4, uint2(keep.get_width() - 1, keep.get_height() - 1))).r > 0.5h) out.write(cur.read(g), g);
+    half k = keep.read(min(g / 4, uint2(keep.get_width() - 1, keep.get_height() - 1))).r;
+    if (k > 0.75h || pm.read(g).r > 0.5h) { out.write(cur.read(g), g); return; }
+    if (k < 0.25h) return;
+    constexpr sampler ls(filter::linear, address::clamp_to_edge, coord::normalized);
+    float2 size = float2(cur.get_width(), cur.get_height()), sc = size / float2(mot.get_width(), mot.get_height());
+    uint2 mp = min(uint2(float2(g) / sc), uint2(mot.get_width() - 1, mot.get_height() - 1));
+    float2 v = float2(mot.read(mp).xy) * sc;   // in the picture's pixels
+    out.write(cur.sample(ls, (float2(g) + 0.5f - 0.5f * v) / size), g);
 }
