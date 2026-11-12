@@ -325,6 +325,17 @@ void dm_fps_state_apply(void) {
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.25f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.25 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    // Wide view (Ocarina of Time's patches.py wide_view; nxnative PR #1460 by vladbondarenko97, as a launcher setting): DM_WIDE_VIEW=1 with DM_WIDE_ASPECT, the
+    // screen's width / height from 1.8 to 2.6 (set by the iOS front end), makes the game's output and render widths follow the screen, multiples of 16: +0x100 u32 the 1440-high width,
+    // +0x104 the 1080-high width, +0x108 the former as a float, +0x10c the ratio in 16.16, +0x110 the aspect as a float for the cameras, +0x114 the 1080-high width as a float for the 2D canvas. 0 = 16:9. The present takes the picture's shape from mtl_present_screen, else it lays it out 16:9
+    { const char *wv = getenv("DM_WIDE_VIEW"), *wa = getenv("DM_WIDE_ASPECT"); char *wend = NULL; float wr = wa ? strtof(wa, &wend) : 0;
+      if (wv && !strcmp(wv, "1") && wa && wend != wa && !*wend && wr >= 1.8f && wr <= 2.6f) {
+          uint32_t w1 = (uint32_t)(1440.0f * wr / 16.0f + 0.5f) * 16, w2 = (uint32_t)(1080.0f * wr / 16.0f + 0.5f) * 16, q = (uint32_t)(wr * 65536.0f + 0.5f); float wf = (float)w1;
+          memcpy(dm_fps_state + 0x100, &w1, 4); memcpy(dm_fps_state + 0x104, &w2, 4); memcpy(dm_fps_state + 0x108, &wf, 4); memcpy(dm_fps_state + 0x10c, &q, 4);
+          float asp = (float)w1 / 1440.0f; memcpy(dm_fps_state + 0x110, &asp, 4);   // +0x110: the cameras' aspect, the output's own (patches.py wide_view: 0 keeps 16:9)
+          float cw = (float)w2; memcpy(dm_fps_state + 0x114, &cw, 4);   // +0x114: the 2D canvas's width at 1080 tall (patches.py wide_view: 0 keeps 1920)
+          extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(w1, 1440);
+          LOG("%s: wide view: %.3f:1, output %ux1440, handheld %ux1080 (DM_WIDE_VIEW)", g_fps_mod, wr, w1, w2); } }
     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field
     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
