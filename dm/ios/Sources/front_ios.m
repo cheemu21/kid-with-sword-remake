@@ -158,6 +158,7 @@ static void launcher_done(void) { [g_root startGame]; }
             if (r >= 1.8 && r <= 2.6) { char v[16]; snprintf(v, sizeof v, "%.3f", r); setenv("DM_WIDE_ASPECT", v, 1); LOG("front end: wide view: window %.0fx%.0f points (%.3f:1)", sz.width, sz.height, r); }
             else LOG("front end: wide view: window %.0fx%.0f points (%.3f:1) is not wider than 16:9, kept 16:9", sz.width, sz.height, r);
         }
+    }
     {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
         // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
         // host writes the state page (main.c dm_fps_state_apply)
