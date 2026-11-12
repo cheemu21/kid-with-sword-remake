@@ -16113,14 +16113,17 @@ typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t ma
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
 static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
-static int fg_on(void); static double fg_size(void);
+static int fg_on(void); static double fg_size(void); static double fg_fixed(void);
 static int fx_mode(void) {
     if (g_fx_mode >= 0) return g_fx_mode;
     const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
     if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
     else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
     else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
-    if (!v && fg_on() && fg_size() < 1) { v = 1; MLOG("present upscaling: metalfx, as frame generation makes its frames smaller than shown (DM_FRAMEGEN_SCALE)"); }
+    // Only for a fixed DM_FRAMEGEN_SCALE below 1: the pixel budget's frames (Wide view: 0.90) are brought back by the present's bilinear pass. Turned on for the budget whenever the
+    // screen had more pixels than it, every present of a 16:9 picture went through MetalFX's spatial scaler (1920x1080 -> 2144x1206, p50 0.7-1.8 ms, p95 up to 4.5 ms, against
+    // 0.1-0.4 ms bilinear), twice a game frame with frame generation, and with the game at 16-18 ms and the interpolation at 7-9 ms an iPhone 18 Pro Max dropped 62-86 of 300 frames (X14, log 10)
+    if (!v && fg_on() && fg_fixed() && fg_fixed() < 1) { v = 1; MLOG("present upscaling: metalfx, as frame generation makes its frames smaller than shown (DM_FRAMEGEN_SCALE)"); }
     if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
     MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
     return g_fx_mode = v;
@@ -16572,10 +16575,11 @@ static uint64_t g_fg_late;
 #define FG_STEADY 3
 #define FG_AGAIN 30
 static int g_fg_steady, g_fg_starved, g_fg_need = 1; static uint64_t g_fg_paused_late, g_fg_paused_behind, g_fg_last_drop;
-// While frames keep dropping (a drop within FG_AGAIN presents of the one before), the interpolation is not run at all (g_fg_shed, read by snap_take): pausing only what is shown
-// left it costing its GPU time just when the GPU was short (X11 on a hot iPhone, log 8: the game 19-22 ms and the interpolation 10 ms a frame against 33, 55-123 of 300 frames
-// dropped). It runs again after g_fg_resume presents in a row in time, 30 at first and twice as many after each new shed (up to 300), so it does not flap between 60 and 30;
-// a minute in time halves it again. Decided by dropped frames, not by the device's temperature
+// While frames keep dropping, the interpolation is not run at all (g_fg_shed, read by snap_take): pausing only what is shown left it costing its GPU time just when the GPU was
+// short (X11 on a hot iPhone, log 8: the game 19-22 ms and the interpolation 10 ms a frame against 33, 55-123 of 300 frames dropped). A second drop within FG_AGAIN presents of
+// the one before stops it: waiting for a run of six within 60 (X14's first build) kept it running over budget, 62-86 of 300 frames dropped (log 10). It runs again after
+// g_fg_resume presents in a row in time: 30 (a second), and 60 at most on repeats (X12 doubled it up to 300, 10 s at 30 fps: nine long stops in four minutes in log 9), back to 30
+// after a minute in time. Decided by dropped frames, not by the device's temperature
 static _Atomic int g_fg_shed; static int g_fg_resume = 30; static uint64_t g_fg_sheds, g_fg_shed_frames, g_fg_calm;
 
 // A display link callback whose present took 50 ms or more (three ticks): where the time went, so a silent link (the rescue below) can be traced to its wait.
@@ -16669,11 +16673,11 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
         // as behind paused frame generation for 1,060 of about 2,900 presents of a run that dropped next to no frames (log 80)
         int behind = ticket > first, late = g_fg_starved, drop = behind || late; g_fg_starved = 0;
         if (drop) { int again = g_fg_last_drop && ticket - g_fg_last_drop <= FG_AGAIN; g_fg_need = again ? FG_STEADY : 1; g_fg_last_drop = ticket;
-            if (again && fg_on() && !atomic_load(&g_fg_shed)) { atomic_store(&g_fg_shed, 1); if (g_fg_sheds++) g_fg_resume = MIN(g_fg_resume * 2, 300); g_fg_calm = 0;
+            if (again && fg_on() && !atomic_load(&g_fg_shed)) { atomic_store(&g_fg_shed, 1); if (g_fg_sheds++) g_fg_resume = MIN(g_fg_resume * 2, 60); g_fg_calm = 0;
                 MLOG("frame generation: frames keep dropping, the interpolation stops until %d presents in a row come in time (#%llu)", g_fg_resume, (unsigned long long)g_fg_sheds); } }
         g_fg_steady = drop ? 0 : g_fg_steady + 1;
         if (atomic_load(&g_fg_shed) && g_fg_steady >= g_fg_resume) { atomic_store(&g_fg_shed, 0); MLOG("frame generation: %d presents in time, the interpolation runs again", g_fg_steady); }
-        if (!drop && ++g_fg_calm >= 1800 && g_fg_resume > 30) { g_fg_resume /= 2; g_fg_calm = 0; }
+        if (!drop && ++g_fg_calm >= 1800 && g_fg_resume > 30) { g_fg_resume = 30; g_fg_calm = 0; }
         if (it.gen && g_fg_steady < g_fg_need) { it.gen = 0; if (behind) g_fg_paused_behind++; else g_fg_paused_late++; }
     }
     g_pq_read = ticket;
@@ -16918,21 +16922,21 @@ static int fg_on(void) {
     return g_fg_mode = v;
 }
 // DM_FRAMEGEN_MV (default 1): frame generation's motion from the presented pictures (fg_motion) and the still HUD kept (fg_keep); 0: no motion, as X6-X9
-static id<MTLComputePipelineState> g_fgmv_ps[6]; static id<MTL4ArgumentTable> g_fgmv_args; static int g_fgmv_ok = -1;
-enum { FGMV_LUMA, FGMV_SEARCH, FGMV_PICK, FGMV_STILL, FGMV_HUD, FGMV_KEEP };
+static id<MTLComputePipelineState> g_fgmv_ps[8]; static id<MTL4ArgumentTable> g_fgmv_args; static int g_fgmv_ok = -1;
+enum { FGMV_LUMA, FGMV_SEARCH, FGMV_PICK, FGMV_STILL, FGMV_HUD, FGMV_KEEP, FGMV_PSTILL, FGMV_CONF };
 static int fg_mv_on(void) {
     if (g_fgmv_ok >= 0) return g_fgmv_ok;
     const char *e = getenv("DM_FRAMEGEN_MV");
     if (e && atoi(e) <= 0) { MLOG("frame generation: no motion given to the interpolator (DM_FRAMEGEN_MV=0): its own flow finds it, up to about 64 px a frame"); return g_fgmv_ok = 0; }
     NSError *err = nil; id<MTLLibrary> lib = host_lib("fgmv", &err);
-    static const char *fn[6] = {"fgmv_luma", "fgmv_search", "fgmv_pick", "fgmv_still", "fgmv_hud", "fgmv_keep"};
-    for (int i = 0; i < 6; i++) {
+    static const char *fn[8] = {"fgmv_luma", "fgmv_search", "fgmv_pick", "fgmv_still", "fgmv_hud", "fgmv_keep", "fgmv_pstill", "fgmv_conf"};
+    for (int i = 0; i < 8; i++) {
         id<MTLFunction> f = lib ? [lib newFunctionWithName:@(fn[i])] : nil;
         g_fgmv_ps[i] = f ? [g_dev newComputePipelineStateWithFunction:f error:&err] : nil;
         if (!g_fgmv_ps[i]) { MLOG("[RED] frame generation: no %s pipeline (%s): the interpolator gets no motion, as X6-X9", fn[i], err.description.UTF8String); return g_fgmv_ok = 0; }
     }
     if (g_fgmv_ps[FGMV_SEARCH].maxTotalThreadsPerThreadgroup < 256) { MLOG("[RED] frame generation: the motion search needs 256 threads a group, this GPU gives %lu: no motion given", (unsigned long)g_fgmv_ps[FGMV_SEARCH].maxTotalThreadsPerThreadgroup); return g_fgmv_ok = 0; }
-    MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 4;
+    MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 5;   // fgmv_keep reads the motion at 4
     g_fgmv_args = [g_dev newArgumentTableWithDescriptor:ad error:&err];
     if (!g_fgmv_args) { MLOG("[RED] frame generation: no argument table for the motion (%s): no motion given", err.description.UTF8String); return g_fgmv_ok = 0; }
     MLOG("frame generation: motion found from the presented pictures (DM_FRAMEGEN_MV=1: 64 px tiles searched within 192 px at 1/8 size), the still HUD kept from the present");
@@ -16964,7 +16968,8 @@ static double g_fg_gpu_last;   // the last interpolation's GPU time in seconds (
 static NSUInteger g_fg_key[3]; static int g_fg_bad;   // the interpolator's colour format, width and height; g_fg_bad: MetalFX made none for them
 static id<MTLTexture> g_fg_depth, g_fg_motion; static int g_fg_clear;   // the depth (constant: far) and motion inputs, cleared by the first command buffer after they are made;
 // the motion is fg_motion's from X10 on (at 1/8 size), else constant (none, at half size)
-static id<MTLTexture> g_fg_tiles, g_fg_still, g_fg_keep;   // fg_motion's tile vectors; fg_keep's still blocks and the blocks kept (4x4 px each)
+static id<MTLTexture> g_fg_tiles, g_fg_still, g_fg_keep, g_fg_pmask, g_fg_conf;   // g_fg_conf: fgmv_conf, at the motion's size
+//   // fg_motion's tile vectors; fg_keep's still blocks and the blocks kept (4x4 px each), and its still pixels (fgmv_pstill)
 static uint64_t g_fg_seq;   // presents that could be copied (present_enqueue), for g_snap[].seq
 static int g_fg_warm;   // interpolations since the history last started again
 static uint64_t g_fg_made, g_fg_resets;
@@ -16995,10 +17000,14 @@ static id<MTL4FXFrameInterpolator> fg_for(id<MTLTexture> col) {
         td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
         MTLTextureDescriptor *bd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:(col.width + 3) / 4 height:(col.height + 3) / 4 mipmapped:NO];
         bd.storageMode = MTLStorageModePrivate; bd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-        id<MTLTexture> tl = [g_dev newTextureWithDescriptor:td], sb = [g_dev newTextureWithDescriptor:bd], kb = [g_dev newTextureWithDescriptor:bd];
-        if (!tl || !sb || !kb) { RED_ONCE(170, "frame generation: no textures for the motion"); return nil; }
-        [g_snap_res addAllocation:tl]; [g_snap_res addAllocation:sb]; [g_snap_res addAllocation:kb];
-        g_fg_tiles = tl; g_fg_still = sb; g_fg_keep = kb;
+        MTLTextureDescriptor *pd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:col.width height:col.height mipmapped:NO];
+        pd.storageMode = MTLStorageModePrivate; pd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        MTLTextureDescriptor *cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:iw height:ih mipmapped:NO];
+        cd.storageMode = MTLStorageModePrivate; cd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> tl = [g_dev newTextureWithDescriptor:td], sb = [g_dev newTextureWithDescriptor:bd], kb = [g_dev newTextureWithDescriptor:bd], pm = [g_dev newTextureWithDescriptor:pd], cf = [g_dev newTextureWithDescriptor:cd];
+        if (!tl || !sb || !kb || !pm || !cf) { RED_ONCE(170, "frame generation: no textures for the motion"); return nil; }
+        [g_snap_res addAllocation:tl]; [g_snap_res addAllocation:sb]; [g_snap_res addAllocation:kb]; [g_snap_res addAllocation:pm]; [g_snap_res addAllocation:cf];
+        g_fg_tiles = tl; g_fg_still = sb; g_fg_keep = kb; g_fg_pmask = pm; g_fg_conf = cf;
     }
     // The ones they replace stay resident: a generation committed before this one may still read them (they are tiny, and a size change is rare)
     [g_snap_res addAllocation:dep]; [g_snap_res addAllocation:mot]; [g_snap_res commit];
@@ -17016,21 +17025,34 @@ static id<MTL4FXFrameInterpolator> fg_for(id<MTLTexture> col) {
 // and 3136x1440), and the present pass would have scaled the picture down to that size anyway. The copy holds the present's crop rectangle alone (the present shows all of
 // it then): Ocarina of Time passes the window's crop with every present, and with crops left out its generated frames stayed at 3136x1440 on an iPhone whose screen is 2622x1206 (log 73).
 // cw, ch: the picture's size (its crop); 1 with *tw, *th the copy's size when the picture is shown at 95 % of it or less
-// DM_FRAMEGEN_SCALE (launcher: Frame generation size, 0.5 to 1, default 1): the copy is made that much smaller still, and the present's MetalFX spatial scaler (fx_mode, turned
-// on for it) brings it back to the shown size: the interpolation's cost follows its pixels (at 0.75 about 0.56 of them), for a softer picture, the HUD included, and the
-// scaler's own time on each of the two presents a game frame has
-static double fg_size(void) {
+// The size it works at follows a pixel budget: a picture shown with more than 1920x1080 pixels (Wide view's 2352x1080 on an iPhone, an iPad, an external screen) is copied that much
+// smaller, at least 0.75 of its shown size, and the present's bilinear pass brings it back to the shown size (MetalFX's spatial scaler only for DM_FRAMEGEN_SCALE, fx_mode). The interpolation's cost follows its
+// pixels: on an iPhone 18 Pro Max with Wide view its GPU time was 8-13 ms a generated frame (p50) at 2352x1080 against 5-10 ms at 1920x1080 (logs 7 and 9), enough with the game's own
+// 11-28 ms to drop frames and stop the interpolation nine times in five minutes. A 16:9 picture on a phone stays at its shown size. The launcher's Frame generation size row (Full / Lighter)
+// is gone: DM_FRAMEGEN_SCALE (0.5 to 1) remains, to measure, as a fixed factor in place of the budget
+enum { FG_BUDGET = 1920 * 1080 };
+static double fg_fixed(void) {   // DM_FRAMEGEN_SCALE, or 0 for the budget
     static double v = -1; if (v >= 0) return v;
-    const char *e = getenv("DM_FRAMEGEN_SCALE"); double x = e && *e ? atof(e) : 1;
-    v = x >= 0.5 && x <= 1 ? x : 1;
+    const char *e = getenv("DM_FRAMEGEN_SCALE"); double x = e && *e ? atof(e) : 0;
+    v = !(e && *e) ? 0 : x >= 0.5 && x <= 1 ? x : 1;
     if (e && *e && v != x) MLOG("[RED] DM_FRAMEGEN_SCALE=%s: 0.5 to 1; using %.2f", e, v);
-    if (v < 1) MLOG("frame generation: its frames and the snapshots they come from at %.2f of the size shown (DM_FRAMEGEN_SCALE), brought back by MetalFX's spatial scaler", v);
+    if (v) MLOG("frame generation: its frames at %.2f of the size shown (DM_FRAMEGEN_SCALE) in place of the 1920x1080 pixel budget", v);
     return v;
+}
+static double fg_size_for(double w, double h) {   // the factor for a picture shown at w x h
+    double f = fg_fixed(); if (f) return f;
+    double px = w * h; return px <= 1.1 * FG_BUDGET ? 1 : fmax(0.75, sqrt(FG_BUDGET / px));   // within 10 % of it (2144x984): as shown, not worth the scaler's pass
+}
+static double fg_size(void) {   // the factor for the screen (the drawable), as fx_mode asks before the first picture: below 1 when frames may be made smaller than shown
+    CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer(); CGSize ds = layer ? layer.drawableSize : CGSizeZero;
+    return ds.width >= 16 && ds.height >= 16 ? fg_size_for(ds.width, ds.height) : fg_fixed() ? fg_fixed() : 1;
 }
 static int fg_shown_size(NSUInteger cw, NSUInteger ch, NSUInteger *tw, NSUInteger *th) {
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer(); if (!layer || !cw || !ch) return 0;
     CGSize ds = layer.drawableSize; if (ds.width < 16 || ds.height < 16) return 0;
-    double s = fmin(fmin(ds.width / cw, ds.height / ch), 1) * fg_size();   // fitted into the drawable, as the present draws it; never larger than the crop
+    double s = fmin(fmin(ds.width / cw, ds.height / ch), 1);   // fitted into the drawable, as the present draws it; never larger than the crop
+    double f = fg_size_for(cw * s, ch * s); s *= f;   // the pixel budget (or DM_FRAMEGEN_SCALE)
+    static double lf = -1; if (f != lf) { lf = f; if (f < 1) MLOG("frame generation: a picture shown at %.0fx%.0f is generated at %.2f of it (%lux%lu, the 1920x1080 pixel budget), brought back by the present", cw * s / f, ch * s / f, f, (unsigned long)lround(cw * s), (unsigned long)lround(ch * s)); }
     if (!(s < 0.95) || s < 0.25) return 0;
     *tw = MAX((NSUInteger)lround(cw * s), 16); *th = MAX((NSUInteger)lround(ch * s), 16); return 1;
 }
@@ -17116,13 +17138,16 @@ static void fg_motion(id<MTL4ComputeCommandEncoder> ce, int k, int pk) {
 }
 // After the interpolation: the still detailed pixels of slot k's picture, and still ones near them (a HUD), written over the generated frame (fgmv_still, fgmv_hud, fgmv_keep)
 static void fg_keep(id<MTL4CommandBuffer> cb, int k, int pk, id<MTLTexture> gen) {
-    id<MTLTexture> col = g_snap[k].tex, prev = g_snap[pk].tex;
+    id<MTLTexture> col = g_snap[k].tex, prev = g_snap[pk].tex, prev2 = prev;   // prev2: the present before prev, when a ring slot holds it (fgmv_pstill)
+    for (int i = 0; i < g_snap_n; i++) if (i != k && i != pk && g_snap[i].seq + 2 == g_snap[k].seq && g_snap[i].tex.width == col.width && g_snap[i].tex.height == col.height && g_snap[i].tex.pixelFormat == col.pixelFormat) prev2 = g_snap[i].tex;
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch visibilityOptions:resource_vis()];   // after MetalFX's encoders
     [ce setArgumentTable:g_fgmv_args];
     fgmv_bind(ce, FGMV_STILL, col, prev, g_fg_still, nil); fgmv_grid(ce, g_fg_still.width, g_fg_still.height); fgmv_step(ce);
-    fgmv_bind(ce, FGMV_HUD, g_fg_still, g_fg_keep, nil, nil); fgmv_grid(ce, g_fg_keep.width, g_fg_keep.height); fgmv_step(ce);
-    fgmv_bind(ce, FGMV_KEEP, col, g_fg_keep, gen, nil); fgmv_grid(ce, gen.width, gen.height);
+    fgmv_bind(ce, FGMV_CONF, g_snap[k].lum, g_snap[pk].lum, g_fg_motion, g_fg_conf); fgmv_grid(ce, g_fg_conf.width, g_fg_conf.height); fgmv_step(ce);
+    fgmv_bind(ce, FGMV_HUD, g_fg_still, g_fg_keep, g_fg_conf, nil); fgmv_grid(ce, g_fg_keep.width, g_fg_keep.height); fgmv_step(ce);
+    fgmv_bind(ce, FGMV_PSTILL, col, prev, prev2, g_fg_pmask); fgmv_grid(ce, col.width, col.height); fgmv_step(ce);
+    fgmv_bind(ce, FGMV_KEEP, col, g_fg_keep, gen, g_fg_pmask); [g_fgmv_args setTexture:g_fg_motion.gpuResourceID atIndex:4]; fgmv_grid(ce, gen.width, gen.height);
     [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the present reads gen
     [ce endEncoding];
 }
