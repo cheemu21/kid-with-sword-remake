@@ -50,3 +50,12 @@ tex_flush_upload	on
 tex_dirty_upload	on
 # The touch controls' Forest colours: blue A, green B, yellow X / Y, red +, deep green shoulders, bronze D-pad, gold rims, all translucent (DmGamepad.m theme_init)
 pad_theme	forest
+# FF (the kid-with-sword-remake fork's experimental iPhone build of nxnative main): the iPhone's settings from the fork's X line.
+# Render pipelines through Metal 4 on the iPhone, with the pipeline archive made offline for the iPhone 18 Pro's GPU (A20 Pro, g19p): draws start from ready bases instead of
+# building their pipelines at their first draw (the fork's X3 and later)
+pso_mtl4	on
+pso_gpu	g19p
+# Frame buffering: each present is copied, so the game's swapchain texture is free at once (the fork's V17, a steady 30 fps)
+present_snap	on
+# Handheld, as an iPhone runs it: the game presents 1920x1080 instead of 2048x1152 docked
+op_mode	handheld
