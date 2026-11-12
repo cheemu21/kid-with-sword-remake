@@ -129,6 +129,31 @@ def wide_view(ctx):
     for w in (0xB9410D2A, 0x340000EA, 0xD360FD0B, 0x9B0B7D4A, 0x9142014A, 0xD354FD4A, 0xD37CED4A, 0xB3407D48): emit(w)   # ratio (16.16); if 0 skip; height * ratio, to a multiple of 16; width
     emit(B(here(), site + 4))
     ctx.put(site, [B(site, start)], 'wide view: output resolution table width from its height')
+    # The camera's aspect: the projection objects' constructors (main+0x9b5f34, main+0x2e1be3c) store 16:9 at +0x100 beside the near plane (0.1 at +0xf8), and a getter's
+    # fallback (main+0x14fc7e0) returns it, so with the wider output the 3D was drawn 16:9 and stretched sideways, about 22 % wide on a 2.18:1 iPhone (the owner's
+    # screenshot: Link, Zelda and Navi fat; PR #1460 at 21:9 on a Mac had said the camera takes its aspect from the render size). Each stub keeps the game's 16:9 in w8,
+    # then takes the state page's float at +0x110 (the output's width / height, loader.c) when it is not 0. x16 is the scratch register: none of the three uses it
+    for site, what in ((0x9b5f38, 'camera projection constructor'), (0x2e1be40, 'second camera projection constructor'), (0x14fc7e4, 'aspect getter fallback')):
+        ctx.site(site, (0x72A7FC68).to_bytes(4, 'little').hex())   # movk w8,#0x3fe3,lsl #16 (16:9 = 0x3fe38e39)
+        start = here(); emit(0x72A7FC68)                       # movk w8,#0x3fe3,lsl #16: the game's 16:9
+        emit(ADRP(16, here(), ctx.state))
+        emit(0xB9411210)                                        # ldr w16,[x16,#0x110]
+        emit(0x34000050)                                        # cbz w16,+8 (0: 16:9 kept)
+        emit(0x2A1003E8)                                        # mov w8,w16
+        emit(B(here(), site + 4))
+        ctx.put(site, [B(site, start)], f'wide view: {what} aspect from the state page (0: 16:9)')
+    # The 2D canvas: main+0xe8303c stores a fixed 1920 x 1080 as the layout canvas's size (+0xe54 / +0xe58) unless one of two flags takes it from the display, so the HUD and
+    # the menus were drawn 16:9 and stretched sideways like the 3D (the owner's screenshots, X15: the item frame 129 x 106 px, 22 % wide; the title's moon, 3D, round). The stub
+    # keeps the game's 1920.0 in w8, then takes the state page's +0x114 (the 1080-high output width as a float, loader.c) when it is not 0: the canvas the screen's shape at 1080 tall
+    site = 0xe8303c
+    ctx.site(site, (0x52A89E08).to_bytes(4, 'little').hex())   # mov w8,#0x44f00000 (1920.0)
+    start = here(); emit(0x52A89E08)
+    emit(ADRP(16, here(), ctx.state))
+    emit(0xB9411610)                                            # ldr w16,[x16,#0x114]
+    emit(0x34000050)                                            # cbz w16,+8 (0: 1920 kept)
+    emit(0x2A1003E8)                                            # mov w8,w16
+    emit(B(here(), site + 4))
+    ctx.put(site, [B(site, start)], 'wide view: the 2D canvas width from the state page (0: 1920)')
 
 FRAME_STEP = {'e0f3ccfaf50065ae4ea01eb5aeb13b1a': frame_step}
 CAPABILITIES = {'e0f3ccfaf50065ae4ea01eb5aeb13b1a': ('WIDE_VIEW',)}   # the launcher's Wide view row (settings.tsv fixups:WIDE_VIEW)

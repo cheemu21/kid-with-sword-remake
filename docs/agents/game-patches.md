@@ -55,6 +55,9 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task and frame-rate block | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
+| `build` → `game` | frame step: the frame-rate controller's interval and fps from the host | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree |
+| `build` → `game` | movie player: the plain player instead of the NDVE-enhanced one | frame rate | blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open) | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | a workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go |
+| `build` → `game` | render scale at the dynamic-resolution status and the final 3D view scale store | rendering | blocked: the two sites and their roles are verified for this main build only | checked: v131072 main E0F3CCFAF50065AE4EA01EB5AEB13B1A: the status ubfx at +0x31d3ee4, the store at +0x31d3f48 and the size loop that clears bit 3 of +0xe2c, 2026-11-06 | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the game's controller status and final scale store are its own code at fixed addresses |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
 
@@ -88,6 +91,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 1 | 0 | 12 | 0 | 0 | `build` → `game` ×3 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -588,6 +592,31 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.1.0 `main`** `909e904a…` ([patches.py:12](../../dm/games/01006BB00C6F0000/patches.py#L12))
   - cut `+0x10cd070`: physics completion task release (calls its own destructor): ldr x8,[x0] → ret (no longer destroyed; the step function rebuilds it in place every step)
+
+### The Legend of Zelda: Ocarina of Time
+
+[The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
+
+- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: frame step: the frame-rate controller's interval and fps from the host. The game's own 30 fps mode (interval 2), chosen by the host's step so presentation and game time agree
+- **`build` → `game`**, rendering, blocked: the two sites and their roles are verified for this main build only, checked: v131072 main E0F3CCFAF50065AE4EA01EB5AEB13B1A: the status ubfx at +0x31d3ee4, the store at +0x31d3f48 and the size loop that clears bit 3 of +0xe2c, 2026-11-06: render scale at the dynamic-resolution status and the final 3D view scale store. The game's controller status and final scale store are its own code at fixed addresses
+- **`build` → `game`**, frame rate, blocked: one build on hand; the faster tensor path is translator work (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open), judgement: movie player: the plain player instead of the NDVE-enhanced one. A workaround: the tensor network costs 47.5 ms of GPU a movie frame; a function fingerprint could carry it over updates, and once the translator keeps LDSM / MOVM / HMMA chains in matrices the cut can go
+
+- **v131072 `main`** `e0f3ccfa…` ([patches.py:9](../../dm/games/0400486024DEC000/patches.py#L9))
+  - cut `+0x3b5f524`: movie player: cbz w8 → b main+0x3b5f548 (the plain player, without the NDVE tensor network)
+  - frame step `+0x9b5f38`: wide view: camera projection constructor aspect from the state page (0: 16:9)
+  - frame step `+0xe8303c`: wide view: the 2D canvas width from the state page (0: 1920)
+  - frame step `+0xecbc80`: wide view: output width as a float from the state page (0: the game's own)
+  - frame step `+0x112c604`: wide view: output resolution table width from its height
+  - frame step `+0x1202ee0`: wide view: graphics setup output width from the state page (0: the game's own)
+  - frame step `+0x14fc7e4`: wide view: aspect getter fallback aspect from the state page (0: 16:9)
+  - frame step `+0x2e1be40`: wide view: second camera projection constructor aspect from the state page (0: 16:9)
+  - frame step `+0x31d3ee4`: dynamic-resolution status: a host render scale not yet stored asks for new 3D sizes (state +0x10)
+  - frame step `+0x31d3f48`: final 3D view scale: the host render scale fixes it, up to 1.0 (over 1.0 = the game's own)
+  - frame step `+0x31f39f4`: wide view: docked render width from the state page (0: the game's own)
+  - frame step `+0x31f3a00`: wide view: handheld render width from the state page (0: the game's own)
+  - frame step `+0x3b4f074`: frame step: the frame-rate controller's interval and fps follow the host's vsyncs (state page target fps; 0 = the game's own choice)
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
+  - launcher capabilities: WIDE_VIEW
 
 ### The Legend of Zelda: Tears of the Kingdom
 

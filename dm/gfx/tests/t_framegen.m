@@ -85,8 +85,82 @@ static int size_case(void) {
     mtl_drain();
     printf("frame generation size: %d checks, %d failed\n", checks, failed); return failed != 0;
 }
+// "t_framegen stab": how steady generated frames are (a measurement, it reports and fails nothing). A detailed scene (value noise of three scales, colour) pans at a steady
+// SPEED px a frame and then a fast one, under an opaque HUD (top left: a box of glyph-like bars) and a half-transparent panel (bottom right, the scene through it, with
+// bars in it). Each generated frame is scored against the ideal halfway picture (the scene at the mean of the two offsets, the HUD as it is): mean error on the scene,
+// on the HUD and on the panel, and the HUD's flicker (its change between consecutive generated frames, 0 at best)
+enum { SW = 960, SH = 540 };
+static float sb_h(int x, int y) { unsigned h = (unsigned)x * 374761393u + (unsigned)y * 668265263u; h = (h ^ (h >> 13)) * 1274126177u; return (float)((h ^ (h >> 16)) & 0xffff) / 65535.f; }
+static float sb_noise(float x, float y, float sc) { float fx = x / sc, fy = y / sc; int ix = (int)floorf(fx), iy = (int)floorf(fy); float tx = fx - ix, ty = fy - iy;
+    float a = sb_h(ix, iy), b = sb_h(ix + 1, iy), c = sb_h(ix, iy + 1), d = sb_h(ix + 1, iy + 1); tx = tx * tx * (3 - 2 * tx); ty = ty * ty * (3 - 2 * ty);
+    return (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty; }
+static void sb_scene(float ox, float x, float y, float *r, float *g, float *b) { float u = x + ox;
+    float n1 = sb_noise(u, y, 64), n2 = sb_noise(u + 1000, y, 12), n3 = sb_noise(u + 2000, y, 3);
+    *r = 0.15f + 0.5f * n1 + 0.25f * n3; *g = 0.2f + 0.35f * n2 + 0.3f * n1; *b = 0.1f + 0.3f * n3 + 0.2f * n2; }
+static int sb_hud(int x, int y) { return x >= 40 && x < 300 && y >= 30 && y < 90; }
+static int sb_panel(int x, int y) { return x >= 660 && x < 930 && y >= 380 && y < 520; }
+static int sb_bar(int x, int y) { return ((x / 6) % 3 != 2) && ((y / 10) % 2 == 0) && ((x * 7 + y * 3) % 23 > 5); }
+static float g_sb_obj;   // the moving object's x offset (its own motion, against the pan)
+static int sb_in_obj(float obj, int x, int y) { float dx = x - (300 + obj), dy = y - 300; return dx * dx + dy * dy < 45 * 45; }
+static void sb_pixel(float ox, int x, int y, uint8_t *px) { float r, g, b; sb_scene(ox, x, y, &r, &g, &b);
+    if (sb_in_obj(g_sb_obj, x, y)) { int u = (int)(x - g_sb_obj); r = ((u / 5 + y / 5) & 1) ? 0.95f : 0.3f; g = 0.2f; b = ((u / 9) & 1) ? 0.9f : 0.1f; }
+    if (sb_hud(x, y)) { float v = sb_bar(x, y) ? 0.95f : 0.08f; r = v; g = v * 0.9f; b = 0.2f; }
+    else if (sb_panel(x, y)) { if (sb_bar(x, y) && (x % 40) < 30) { r = g = b = 0.9f; } else { r = 0.5f * r + 0.05f; g = 0.5f * g + 0.1f; b = 0.5f * b + 0.25f; } }
+    px[0] = (uint8_t)fminf(255, r * 255 + 0.5f); px[1] = (uint8_t)fminf(255, g * 255 + 0.5f); px[2] = (uint8_t)fminf(255, b * 255 + 0.5f); px[3] = 255; }
+static uint8_t *sb_image(float ox) { uint8_t *p = malloc(SW * SH * 4); for (int y = 0; y < SH; y++) for (int x = 0; x < SW; x++) sb_pixel(ox, x, y, p + 4 * (y * SW + x)); return p; }
+static tex_t sb_tex(float ox, int i) {
+    uint8_t *p = sb_image(ox);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:SW height:SH mipmapped:NO];
+    d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead; id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d];
+    [mt replaceRegion:MTLRegionMake2D(0, 0, SW, SH) mipmapLevel:0 withBytes:p bytesPerRow:SW * 4]; free(p);
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=95001+(uint64_t)i}; t.d.width = SW; t.d.height = SH; t.d.depth = t.d.levels = t.d.samples = 1;
+    t.d.target = NVN_TEXTURE_TARGET_2D; t.d.format = NVN_FORMAT_RGBA8; serial_put(t.serial, mt); res_add(mt); res_commit(); return t;
+}
+static uint8_t *sb_read(id<MTLTexture> t) {
+    id<MTLBuffer> out = [g_dev newBufferWithLength:SW * SH * 4 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(SW, SH, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:SW * 4 destinationBytesPerImage:SW * SH * 4];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    uint8_t *p = malloc(SW * SH * 4); memcpy(p, out.contents, SW * SH * 4); return p;
+}
+static int stab_case(void) {
+    setenv("DM_FRAMEGEN", "1", 1); setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LINK", "0", 1);
+    mtl_init();
+    g_test_layer = [CAMetalLayer layer]; g_test_layer.device = g_dev; g_test_layer.drawableSize = CGSizeMake(SW, SH); g_test_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    mtl_present_screen(SW, SH); mtl_present_layer(SW, SH);
+    const char *e = getenv("STAB_SPEEDS"); int sp[2] = {24, 96}; if (e) sscanf(e, "%d,%d", &sp[0], &sp[1]);
+    for (int run = 0; run < 2; run++) {
+        float off = 0, prev_off = 0, obj = 0, prev_obj = 0; double es = 0, eh = 0, ep = 0, fl = 0, es2 = 0, eo = 0, ew = 0, ea = 0, eheld = 0; int n = 0, nf = 0; uint8_t *last = NULL;
+        for (int i = 0; i < 16; i++) {
+            prev_off = off; off += sp[run]; prev_obj = obj; obj += 32;
+            g_sb_obj = obj; tex_t t = sb_tex(off, run * 100 + i); present_enqueue(&t, 1 / 30.0, NULL, 0); mtl_present_flush(); copied();
+            int k = last_slot(); if (!g_snap[k].gen_ok || i < 5) continue;
+            g_sb_obj = obj; uint8_t *cur = sb_image(off); g_sb_obj = prev_obj; uint8_t *prv = sb_image(prev_off);
+            g_sb_obj = (obj + prev_obj) / 2; uint8_t *g = sb_read(g_snap[k].gen), *ideal = sb_image((off + prev_off) / 2);
+            double s = 0, h = 0, pl = 0, ob = 0, wa = 0, oa = 0; long ns = 0, nh = 0, np = 0, no = 0, nw = 0, held = 0, hx[10] = {0}, hy[6] = {0};
+            for (int y = 0; y < SH; y++) for (int x = 0; x < SW; x++) { int o = 4 * (y * SW + x); double d = (fabs(g[o] - ideal[o]) + fabs(g[o + 1] - ideal[o + 1]) + fabs(g[o + 2] - ideal[o + 2])) / (3 * 255.0);
+                float dx = x - (300 + g_sb_obj), dy = y - 300; int near = dx * dx + dy * dy < 80 * 80;   // the object and the ring around it it uncovers
+                double dc = (fabs(g[o] - cur[o]) + fabs(g[o + 1] - cur[o + 1]) + fabs(g[o + 2] - cur[o + 2])) / (3 * 255.0), dp = (fabs(g[o] - prv[o]) + fabs(g[o + 1] - prv[o + 1]) + fabs(g[o + 2] - prv[o + 2])) / (3 * 255.0);
+                double art = fmin(d, fmin(dc, dp)); wa += art; nw++;
+                if (!near && !sb_hud(x, y) && !sb_panel(x, y) && dc < 1.5 / 255 && d > 3.0 / 255) { held++; if (getenv("STAB_WHERE")) hx[x * 10 / SW]++, hy[y * 6 / SH]++; }   // the scene shown as the present has it where the halfway picture differs   // in none of the three pictures: a ghost, a smear, a tear
+                if (near && !sb_hud(x, y) && !sb_panel(x, y)) { ob += d; no++; oa += art; }
+                if (sb_hud(x, y)) { h += d; nh++; } else if (sb_panel(x, y)) { pl += d; np++; } else if (!near && x > 8 && x < SW - 8 && y > 8 && y < SH - 8) { s += d; ns++; } }
+            if (getenv("STAB_WHERE") && i == 15) { printf("held by tenth of width:"); for (int q = 0; q < 10; q++) printf(" %ld", hx[q]); printf("; by sixth of height:"); for (int q = 0; q < 6; q++) printf(" %ld", hy[q]); printf("\n"); }
+            eo += ob / no; ew += wa / nw; ea += oa / no; eheld += (double)held / ns; free(cur); free(prv);
+            s /= ns; es += s; es2 += s * s; eh += h / nh; ep += pl / np; n++;
+            if (last) { double f = 0; long nn = 0; for (int y = 30; y < 90; y++) for (int x = 40; x < 300; x++) { int o = 4 * (y * SW + x); f += fabs(g[o] - last[o]) / 255.0; nn++; } fl += f / nn; nf++; }
+            free(last); last = g; free(ideal);
+        }
+        free(last);
+        double m = es / n;
+        printf("stab: %3d px a frame: scene error %.4f (spread %.4f), HUD error %.4f, panel error %.4f, HUD flicker %.4f, moving object error %.4f; artifacts: whole picture %.5f, around the object %.4f; scene held at 30 fps %.1f%% (%d frames)\n", sp[run], m, sqrt(fmax(0, es2 / n - m * m)), eh / n, ep / n, nf ? fl / nf : 0, eo / n, ew / n, ea / n, 100 * eheld / n, n);
+        calm_reset_history: g_fg_warm = 0;
+    }
+    mtl_drain(); return 0;
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc > 1 && !strcmp(argv[1], "size")) return size_case();
+    if (argc > 1 && !strcmp(argv[1], "stab")) return stab_case();
     alarm(90); setbuf(stdout, NULL);
     setenv("DM_FRAMEGEN", "1", 1); setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LINK", "0", 1);   // the present thread first; the link's ticks are called below
     mtl_init();

@@ -15616,15 +15616,15 @@ static int fg_on(void) {
     return g_fg_mode = v;
 }
 // DM_FRAMEGEN_MV (default 1): frame generation's motion from the presented pictures (fg_motion) and the still HUD kept (fg_keep); 0: no motion, as X6-X9
-static id<MTLComputePipelineState> g_fgmv_ps[6]; static id<MTL4ArgumentTable> g_fgmv_args; static int g_fgmv_ok = -1;
-enum { FGMV_LUMA, FGMV_SEARCH, FGMV_PICK, FGMV_STILL, FGMV_HUD, FGMV_KEEP };
+static id<MTLComputePipelineState> g_fgmv_ps[7]; static id<MTL4ArgumentTable> g_fgmv_args; static int g_fgmv_ok = -1;
+enum { FGMV_LUMA, FGMV_SEARCH, FGMV_PICK, FGMV_STILL, FGMV_HUD, FGMV_KEEP, FGMV_PSTILL };
 static int fg_mv_on(void) {
     if (g_fgmv_ok >= 0) return g_fgmv_ok;
     const char *e = getenv("DM_FRAMEGEN_MV");
     if (e && atoi(e) <= 0) { MLOG("frame generation: no motion given to the interpolator (DM_FRAMEGEN_MV=0): its own flow finds it, up to about 64 px a frame"); return g_fgmv_ok = 0; }
     NSError *err = nil; id<MTLLibrary> lib = host_lib("fgmv", &err);
-    static const char *fn[6] = {"fgmv_luma", "fgmv_search", "fgmv_pick", "fgmv_still", "fgmv_hud", "fgmv_keep"};
-    for (int i = 0; i < 6; i++) {
+    static const char *fn[7] = {"fgmv_luma", "fgmv_search", "fgmv_pick", "fgmv_still", "fgmv_hud", "fgmv_keep", "fgmv_pstill"};
+    for (int i = 0; i < 7; i++) {
         id<MTLFunction> f = lib ? [lib newFunctionWithName:@(fn[i])] : nil;
         g_fgmv_ps[i] = f ? [g_dev newComputePipelineStateWithFunction:f error:&err] : nil;
         if (!g_fgmv_ps[i]) { MLOG("[RED] frame generation: no %s pipeline (%s): the interpolator gets no motion, as X6-X9", fn[i], err.description.UTF8String); return g_fgmv_ok = 0; }
@@ -15662,7 +15662,7 @@ static double g_fg_gpu_last;   // the last interpolation's GPU time in seconds (
 static NSUInteger g_fg_key[3]; static int g_fg_bad;   // the interpolator's colour format, width and height; g_fg_bad: MetalFX made none for them
 static id<MTLTexture> g_fg_depth, g_fg_motion; static int g_fg_clear;   // the depth (constant: far) and motion inputs, cleared by the first command buffer after they are made;
 // the motion is fg_motion's from X10 on (at 1/8 size), else constant (none, at half size)
-static id<MTLTexture> g_fg_tiles, g_fg_still, g_fg_keep;   // fg_motion's tile vectors; fg_keep's still blocks and the blocks kept (4x4 px each)
+static id<MTLTexture> g_fg_tiles, g_fg_still, g_fg_keep, g_fg_pmask;   // fg_motion's tile vectors; fg_keep's still blocks and the blocks kept (4x4 px each), and its still pixels (fgmv_pstill)
 static uint64_t g_fg_seq;   // presents that could be copied (present_enqueue), for g_snap[].seq
 static int g_fg_warm;   // interpolations since the history last started again
 static uint64_t g_fg_made, g_fg_resets;
@@ -15693,10 +15693,12 @@ static id<MTL4FXFrameInterpolator> fg_for(id<MTLTexture> col) {
         td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
         MTLTextureDescriptor *bd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:(col.width + 3) / 4 height:(col.height + 3) / 4 mipmapped:NO];
         bd.storageMode = MTLStorageModePrivate; bd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-        id<MTLTexture> tl = [g_dev newTextureWithDescriptor:td], sb = [g_dev newTextureWithDescriptor:bd], kb = [g_dev newTextureWithDescriptor:bd];
-        if (!tl || !sb || !kb) { RED_ONCE(155, "frame generation: no textures for the motion"); return nil; }
-        [g_snap_res addAllocation:tl]; [g_snap_res addAllocation:sb]; [g_snap_res addAllocation:kb];
-        g_fg_tiles = tl; g_fg_still = sb; g_fg_keep = kb;
+        MTLTextureDescriptor *pd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:col.width height:col.height mipmapped:NO];
+        pd.storageMode = MTLStorageModePrivate; pd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> tl = [g_dev newTextureWithDescriptor:td], sb = [g_dev newTextureWithDescriptor:bd], kb = [g_dev newTextureWithDescriptor:bd], pm = [g_dev newTextureWithDescriptor:pd];
+        if (!tl || !sb || !kb || !pm) { RED_ONCE(155, "frame generation: no textures for the motion"); return nil; }
+        [g_snap_res addAllocation:tl]; [g_snap_res addAllocation:sb]; [g_snap_res addAllocation:kb]; [g_snap_res addAllocation:pm];
+        g_fg_tiles = tl; g_fg_still = sb; g_fg_keep = kb; g_fg_pmask = pm;
     }
     // The ones they replace stay resident: a generation committed before this one may still read them (they are tiny, and a size change is rare)
     [g_snap_res addAllocation:dep]; [g_snap_res addAllocation:mot]; [g_snap_res commit];
@@ -15814,13 +15816,15 @@ static void fg_motion(id<MTL4ComputeCommandEncoder> ce, int k, int pk) {
 }
 // After the interpolation: the still detailed pixels of slot k's picture, and still ones near them (a HUD), written over the generated frame (fgmv_still, fgmv_hud, fgmv_keep)
 static void fg_keep(id<MTL4CommandBuffer> cb, int k, int pk, id<MTLTexture> gen) {
-    id<MTLTexture> col = g_snap[k].tex, prev = g_snap[pk].tex;
+    id<MTLTexture> col = g_snap[k].tex, prev = g_snap[pk].tex, prev2 = prev;   // prev2: the present before prev, when a ring slot holds it (fgmv_pstill)
+    for (int i = 0; i < g_snap_n; i++) if (i != k && i != pk && g_snap[i].seq + 2 == g_snap[k].seq && g_snap[i].tex.width == col.width && g_snap[i].tex.height == col.height && g_snap[i].tex.pixelFormat == col.pixelFormat) prev2 = g_snap[i].tex;
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch visibilityOptions:resource_vis()];   // after MetalFX's encoders
     [ce setArgumentTable:g_fgmv_args];
     fgmv_bind(ce, FGMV_STILL, col, prev, g_fg_still, nil); fgmv_grid(ce, g_fg_still.width, g_fg_still.height); fgmv_step(ce);
     fgmv_bind(ce, FGMV_HUD, g_fg_still, g_fg_keep, nil, nil); fgmv_grid(ce, g_fg_keep.width, g_fg_keep.height); fgmv_step(ce);
-    fgmv_bind(ce, FGMV_KEEP, col, g_fg_keep, gen, nil); fgmv_grid(ce, gen.width, gen.height);
+    fgmv_bind(ce, FGMV_PSTILL, col, prev, prev2, g_fg_pmask); fgmv_grid(ce, col.width, col.height); fgmv_step(ce);
+    fgmv_bind(ce, FGMV_KEEP, col, g_fg_keep, gen, g_fg_pmask); fgmv_grid(ce, gen.width, gen.height);
     [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the present reads gen
     [ce endEncoding];
 }

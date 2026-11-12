@@ -131,8 +131,19 @@ kernel void fgmv_hud(texture2d<half, access::read> st [[texture(0)]], texture2d<
         for (int y = -3; y <= 3 && k == 0; y++) for (int x = -3; x <= 3; x++) if (st.read(uint2(clamp(gi + int2(x, y), int2(0), mx))).r > 1.5h) { k = 1; break; }
     keep.write(half4(k), g);
 }
+// fgmv_pstill: per pixel, 1 where it did not change across the last three presents (no channel by more than 2/255 from the present before, nor that one from the one
+// before it). A HUD drawn over a moving picture, a half-transparent panel with text on it, has no still 4x4 block: its text moved with the picture behind it, with 10-20
+// times the error of the rest (t_framegen stab: 0.031 at 24 px a frame, 0.096 at 96). Three presents, not two, so a moving picture matching by chance is rare; where it
+// does, a smooth area, the present's own pixel is next to what the interpolation would give. prev2 is prev when there is no present before it
+kernel void fgmv_pstill(texture2d<float, access::read> cur [[texture(0)]], texture2d<float, access::read> prev [[texture(1)]], texture2d<float, access::read> prev2 [[texture(2)]],
+                        texture2d<half, access::write> m [[texture(3)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= m.get_width() || g.y >= m.get_height()) return;
+    float3 a = cur.read(g).rgb, b = prev.read(g).rgb, c = prev2.read(g).rgb;
+    float3 d = max(fabs(a - b), fabs(b - c));
+    m.write(half4(max(d.x, max(d.y, d.z)) <= 2.5f / 255 ? 1.0h : 0.0h), g);
+}
 kernel void fgmv_keep(texture2d<float, access::read> cur [[texture(0)]], texture2d<half, access::read> keep [[texture(1)]], texture2d<float, access::write> out [[texture(2)]],
-                      uint2 g [[thread_position_in_grid]]) {
+                      texture2d<half, access::read> pm [[texture(3)]], uint2 g [[thread_position_in_grid]]) {
     if (g.x >= out.get_width() || g.y >= out.get_height()) return;
-    if (keep.read(min(g / 4, uint2(keep.get_width() - 1, keep.get_height() - 1))).r > 0.5h) out.write(cur.read(g), g);
+    if (keep.read(min(g / 4, uint2(keep.get_width() - 1, keep.get_height() - 1))).r > 0.5h || pm.read(g).r > 0.5h) out.write(cur.read(g), g);
 }
