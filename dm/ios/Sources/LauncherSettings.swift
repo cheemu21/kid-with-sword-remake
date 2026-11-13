@@ -36,6 +36,9 @@ struct Setting: Decodable, Identifiable {
 struct SettingsFile: Decodable { let settings: [Setting] }
 
 final class LauncherModel: ObservableObject {
+    // The screen's width / height (the iOS launcher sets it from the app's window, as front_ios.m measures it for Wide view), for the render scale's size in pixels with
+    // Wide view on; nil keeps 16:9 (the Mac)
+    static var screenAspect: Double?
     let settings: [Setting]
     let fixed: Set<String>      // set by the launch environment: shown, not changed
     let fromLaunch: Set<String>   // the same set (a front end's launch overrides, Xcode; DM_ENV_LAUNCH_KEYS from launcher.c or main.m)
@@ -94,9 +97,16 @@ final class LauncherModel: ObservableObject {
         var p = "\(Int((v * 100).rounded())) %"
         if let name = s.marks?.first(where: { $0.count == 2 && abs((Double($0[0]) ?? -1) - v) < 0.001 })?[1] { p += " · \(name)" }
         guard let b = s.base else { return p }
-        let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked
+        let handheld = (values["DM_OPMODE"] ?? "1") == "0", size = handheld ? b.handheld : b.docked
         guard size.count == 2 else { return p }
-        return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
+        var w = Int((Double(size[0]) * v).rounded()); let h = Int((Double(size[1]) * v).rounded())
+        // Wide view (Ocarina of Time): the output's width follows the screen at 1080 or 1440 tall, a multiple of 16 (loader.c dm_fps_state_apply), and the game takes the 3D
+        // width from the 3D height and the output's shape, rounded down (logs at 0.6: 1432 x 658 for 2352 x 1080, 1909 x 877 for 3136 x 1440)
+        if values["DM_WIDE_VIEW"] == "1", let r = LauncherModel.screenAspect, r >= 1.8, r <= 2.6 {
+            let oh = handheld ? 1080.0 : 1440.0, ow = (oh * r / 16).rounded() * 16
+            w = Int((Double(h) * ow / oh).rounded(.down))
+        }
+        return "\(w) × \(h) (\(p))"
     }
     var changed: Bool { settings.contains { !fixed.contains($0.env) && !isBase($0, values[$0.env] ?? base($0)) } }
 

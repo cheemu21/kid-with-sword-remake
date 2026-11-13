@@ -11189,6 +11189,35 @@ static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, ui
     if (!(sh->logged & 16)) { sh->logged |= 16; static int nlog; if (nlog++ < 16) MLOG("uniform slot %d of shader %s (stage %d) is bound with %llu bytes (%llu readable, a multiple of 256) and read up to byte %u at fixed offsets: it is encoded with zeros past those (%llu such encodes so far)", reg, sh->key, st, (unsigned long long)u->size, (unsigned long long)live, need, (unsigned long long)n); }
     return g_cur_arena->gpu + off;
 }
+// Wide view's HUD (DM_WIDE_VIEW with DM_WIDE_ASPECT): Ocarina of Time draws its 2D (HUD, menus, speech bubbles) in a fixed 3840x2160 layout, with an orthographic projection
+// in the vertex stage's uniform block (x scale 1/1920, y 1/1080, near 0 and far 300; a flipped copy at +0x40; the layout's and the screen's size, 3840 2160 3840 2160, at +0x80;
+// a Mac run's pass dump, F6000 pass 457585, shader adacdc69c5a2cadc_b), over whatever target it draws into: on Wide view's 2352x1080 every element was 1.225 times too wide
+// (hearts 1.64:1 against 1.36:1 at 16:9; FF4 on the owner's iPhone 1.69:1), the game's canvas (patches.py, main+0xe8303c) not being what the projection follows. A block with
+// that signature bound while the viewport is wider than 16:9 is copied into the arena with both projections' x scale times (16:9) / the viewport's aspect: the layout drawn at
+// its own shape in the middle 16:9 of the screen, as a PC game keeps its HUD on an ultrawide screen. The game's world-to-layout mapping (speech bubbles and markers over a
+// character, patches.py: main+0x20c2b0, +0x20c99c, +0x215fb0) is widened by the same factor, so a bubble stays over its character. 0 when the block is not one of those
+static int wide2d_on(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *wv = getenv("DM_WIDE_VIEW"), *wa = getenv("DM_WIDE_ASPECT"), *off = getenv("DM_WIDE_HUD");
+    v = wv && !strcmp(wv, "1") && wa && atof(wa) > 1.8 && !(off && !strcmp(off, "0"));
+    if (v) MLOG("wide view: the 2D layout's projection kept at its own shape on a wider viewport (DM_WIDE_HUD=0 stretches it as before)");
+    return v;
+}
+// probe.c (the Mac host) defines it; this weak default (graphics tests, iOS) does nothing. A weak declaration alone left an undefined symbol the Darwin linker refuses
+__attribute__((weak)) void probe_watch_at(uint64_t at, uint64_t len) { (void)at; (void)len; MLOG("wide view: DM_WATCH_SCENE: this build has no write watch (the Mac host only)"); }
+static uint64_t wide2d_fix(const uint8_t *src, uint64_t n, __strong id<MTLBuffer> *use) {
+    uint32_t w[36]; memcpy(w, src, sizeof w);
+    if (w[0] != 0x3A088889u || w[32] != 0x45700000u || w[33] != 0x45070000u) return 0;   // 1/1920; 3840.0, 2160.0
+    if (!S.has_vp || !(S.vp[0][3] > 0)) return 0;
+    double a = S.vp[0][2] / S.vp[0][3], f = (1920.0 / 1080.0) / a;
+    if (!(f < 0.99)) return 0;   // a 16:9 (or narrower) target: as the game draws it
+    size_t len = (size_t)(n < 256 ? 256 : n);
+    size_t off = arena_alloc(len, use); uint8_t *d = g_cur_arena->cpu + off;
+    memcpy(d, src, (size_t)n); if (len > n) memset(d + n, 0, len - (size_t)n);
+    float *m = (float *)(void *)d; m[0] = (float)(m[0] * f); m[16] = (float)(m[16] * f);   // x scale of the projection and of its flipped copy
+    static uint64_t cnt; if (!cnt++) MLOG("wide view: a 2D layout projection on a %.0fx%.0f viewport drawn at %.3f of its width (its own shape)", S.vp[0][2], S.vp[0][3], f);
+    return g_cur_arena->gpu + off;
+}
 // A CBUF slot's GPU address, and in *use the buffer it points into: the bound uniform buffer; the shadow of inline updates deferred in this pass; an arena copy padded with zeros
 // when the binding is shorter than the shader reads it at fixed offsets (ub_padded); or the all-zero bank when nothing usable is bound. The full encode and the patch take it from here
 static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __strong id<MTLBuffer> *use) {
@@ -11204,6 +11233,13 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
         return ub_padded(sh, nvn_stage, reg, u, live, 4u * b->fixw, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, use); }
     *use = (__bridge id<MTLBuffer>)mb;
     uint64_t ul = cb_len(sh, reg, u->size);   // what the shader can read of it
+    {   // DM_WATCH_SCENE=1 (diagnostic, Mac): the first camera constants block bound (near 0.1, far past 1000, aspect 16:9: Ocarina of Time's scene block) has its aspect write-watched
+        // (probe.c probe_watch_at), so the log names the code that writes the aspect the 3D draws with
+        static int ws = -1; if (ws < 0) ws = getenv("DM_WATCH_SCENE") != NULL;
+        if (__builtin_expect(ws, 0) && u->size >= 16) { float sv[3]; memcpy(sv, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, sizeof sv);
+            if (fabsf(sv[0] - 0.1f) < 1e-6f && sv[1] > 1000 && fabsf(sv[2] - 1.7777778f) < 1e-4f) probe_watch_at(u->addr + 8, 4); } }
+    if (nvn_stage == 0 && u->size >= 144 && wide2d_on() && !(g_nubd && ubd_hits(u->addr, u->addr + ul))) {   // Wide view's HUD (wide2d_fix)
+        uint64_t w = wide2d_fix((const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, ul > u->size ? u->size : ul, use); if (w) return w; }
     if (g_nubd && ubd_hits(u->addr, u->addr + ul)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding or the rest can be read from memory
         uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
         else if (ubp_get(u->addr, u->addr + ul, &g, &c)) gpu = g;
@@ -16707,17 +16743,12 @@ static uint64_t g_fg_late;
 static int g_fg_starved; static uint64_t g_fg_paused_behind, g_fg_last_drop, g_fg_drops;
 // Frames dropping on and on (a second drop within FG_AGAIN presents of the one before) make the interpolation lighter instead: the pixel budget's next step (fg_level_down,
 // g_fg_budget), smaller generated and shown frames brought back to the screen's size by the present's bilinear pass; past the last step it stays there and keeps running.
-// Its cost follows its pixels, so 960x540 costs about a quarter of 1920x1080, and the GPU's lighter load is less heat. The first step is a phone's whole 1920x1080, X9's
-// picture: FF3 started at 1440x810, stepped down to 960x540 in the first seconds' loading and stayed there all session (log 18), soft next to X9 (the owner). A step back up
-// after FG_UP_CALM presents in a row in time (20 s at 30 fps; a minute kept FF3 at 960x540), twice that, up to FG_UP_CALM_MAX, when the step up was followed by another
-// step down within FG_UP_BACK presents. A hitch (a present FG_HITCH present intervals or more after the one before: a load, a scene change, a pipeline built) drops frames
-// whatever the interpolation costs, and is not counted toward a step down. Decided by dropped frames, not by the temperature
-// The first step is no budget at all, the picture as shown (Wide view's 2352x1080 too: FF4 has Wide view on by default, and its frames at 1920x1080's budget were 0.90 of it)
-enum { FG_LEVELS = 5, FG_UP_CALM = 600, FG_UP_CALM_MAX = 7200, FG_UP_BACK = 600, FG_HITCH = 3 };
-static const double g_fg_budget[FG_LEVELS] = {1e12, 1920.0 * 1080, 1440.0 * 810, 1200.0 * 675, 960.0 * 540};
-static const char *const g_fg_budget_name[FG_LEVELS] = {"full (as shown)", "1920x1080", "1440x810", "1200x675", "960x540"};
-static double g_fg_take_ts;   // the display time of the last present taken (display link thread, under g_pq_mu), for FG_HITCH
-static uint64_t g_fg_hitches;
+// Its cost follows its pixels, so 960x540 costs about a quarter of 1920x1080, and the GPU's lighter load is less heat. A step back up after FG_UP_CALM presents in a row in
+// time (a minute at 30 fps), twice that, up to FG_UP_CALM_MAX, when the step up was followed by another step down within FG_UP_BACK presents. Decided by dropped frames,
+// not by the temperature
+enum { FG_LEVELS = 3, FG_UP_CALM = 1800, FG_UP_CALM_MAX = 7200, FG_UP_BACK = 600 };
+static const double g_fg_budget[FG_LEVELS] = {1440.0 * 810, 1200.0 * 675, 960.0 * 540};
+static const char *const g_fg_budget_name[FG_LEVELS] = {"1440x810", "1200x675", "960x540"};
 static _Atomic int g_fg_level;   // the budget's step: changed on the display link thread under g_pq_mu, read where the snapshots are sized (fg_shown_size)
 static _Atomic uint64_t g_fg_shown_px;   // the pixels of the last picture sized for frame generation as shown (fg_shown_size), for fg_level_down
 static uint64_t g_fg_lvl_calm, g_fg_up_at, g_fg_lvl_downs, g_fg_lvl_ups; static int g_fg_up_need = FG_UP_CALM;
@@ -16785,9 +16816,9 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
         if (!newer && g_dm_present_link && !g_rescue_mode) {
             pq_item ow = g_fg_owe; uint64_t tk = g_fg_owe_tk;
             if (!(++g_fg_shown % 1800)) MLOG("frame generation on the display link: %llu generated frames shown, each followed by its present's own picture; %llu of those skipped for a newer present; "
-                                             "presents dropped or late %llu (%llu of them hitches, not counted toward a lighter step), %llu shown without theirs (taken over dropped ones); "
+                                             "presents dropped or late %llu, %llu of them shown without theirs (taken over dropped ones); "
                                              "made lighter %llu times and back %llu times, now the %s pixel budget", (unsigned long long)g_fg_shown, (unsigned long long)g_fg_late,
-                                             (unsigned long long)g_fg_drops, (unsigned long long)g_fg_hitches, (unsigned long long)g_fg_paused_behind,
+                                             (unsigned long long)g_fg_drops, (unsigned long long)g_fg_paused_behind,
                                              (unsigned long long)g_fg_lvl_downs, (unsigned long long)g_fg_lvl_ups, fg_fixed() ? "DM_FRAMEGEN_SCALE's" : g_fg_budget_name[atomic_load(&g_fg_level)]);
             pthread_mutex_unlock(&g_pq_mu);
             g_fg_owing = 1; uint64_t p0 = now_ns(), a0 = g_present_alloc_wait_ns, r0 = g_present_res_ns;
@@ -16815,10 +16846,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
         // Behind: older presents were dropped for this one. One newer present waiting is not: with snapshots the game runs a frame ahead of the screen, and taking that
         // as behind paused frame generation for 1,060 of about 2,900 presents of a run that dropped next to no frames (log 80)
         int behind = ticket > first, late = g_fg_starved, drop = behind || late; g_fg_starved = 0;
-        double ts = update.targetPresentationTimestamp, per = it.period > 0.025 ? it.period : 1 / 30.0;
-        int hitch = drop && g_fg_take_ts > 0 && ts - g_fg_take_ts >= FG_HITCH * per - tol; g_fg_take_ts = ts;   // (FG_HITCH)
-        if (hitch) { g_fg_drops++; g_fg_hitches++; g_fg_lvl_calm = 0; }
-        else if (drop) { int again = g_fg_last_drop && ticket - g_fg_last_drop <= FG_AGAIN; g_fg_last_drop = ticket; g_fg_lvl_calm = 0; g_fg_drops++;
+        if (drop) { int again = g_fg_last_drop && ticket - g_fg_last_drop <= FG_AGAIN; g_fg_last_drop = ticket; g_fg_lvl_calm = 0; g_fg_drops++;
             if (again && fg_on()) {
                 if (fg_level_down()) {   // lighter (FG_LEVELS)
                     if (g_fg_up_at && ticket - g_fg_up_at <= FG_UP_BACK) g_fg_up_need = MIN(g_fg_up_need * 2, FG_UP_CALM_MAX);
@@ -17182,12 +17210,11 @@ static id<MTL4FXFrameInterpolator> fg_for(id<MTLTexture> col) {
 // pixels: on an iPhone 18 Pro Max with Wide view its GPU time was 8-13 ms a generated frame (p50) at 2352x1080 against 5-10 ms at 1920x1080 (logs 7 and 9), enough with the game's own
 // 11-28 ms to drop frames and stop the interpolation nine times in five minutes. The launcher's Frame generation size row (Full / Lighter) is gone: DM_FRAMEGEN_SCALE (0.5 to 1)
 // remains, to measure, as a fixed factor in place of the budget.
-// There is no budget at first (X9's picture as shown, Wide view's too; FF3 began at 1440x810 for the reason below) and steps down while frames keep dropping (g_fg_level,
-// fg_level_down): at 1920x1080 the interpolation took 5-10 ms of GPU time a generated frame
+// The budget is 1440x810 and steps down while frames keep dropping (g_fg_level, fg_level_down): at 1920x1080 the interpolation took 5-10 ms of GPU time a generated frame
 // (p95 16 ms) on an iPhone where the game's own frame took 28-30 ms in Hyrule Field, and the two did not fit in 33 ms: frames dropped and the interpolation stopped 11 times
 // in two minutes, the picture switching between 60 and 30 each time (FF2, log 15; the same run without frame generation dropped next to none). Its cost follows its pixels,
 // so 1440x810 (0.75 of a 16:9 phone picture, 56 % of the pixels) costs about half. Its own pictures come from the same copy (fg_shown_size), so they are that size too, brought
-// back by the present's bilinear pass. Steps (g_fg_budget): as shown, 1920x1080, 1440x810, 1200x675, 960x540, never below 0.5 of the size shown
+// back by the present's bilinear pass. Steps (g_fg_budget): 1440x810, 1200x675, 960x540, never below 0.5 of the size shown
 static double fg_fixed(void) {   // DM_FRAMEGEN_SCALE, or 0 for the budget
     static double v = -1; if (v >= 0) return v;
     const char *e = getenv("DM_FRAMEGEN_SCALE"); double x = e && *e ? atof(e) : 0;
@@ -17204,14 +17231,12 @@ static double fg_size_for(double w, double h) {   // the factor for a picture sh
     double f = fg_fixed(); if (f) return f;
     return fg_size_at(w * h, atomic_load(&g_fg_level));
 }
-// Frames keep dropping (the display link, under g_pq_mu): the next step of the budget that makes the last picture's frames smaller (steps that do not, as 1920x1080's for a
-// picture of that size, are passed over); 0 when there is none (the
+// Frames keep dropping (the display link, under g_pq_mu): the next step of the budget, when it makes the last picture's frames smaller; 0 when there is none (the
 // interpolation then stays at its lightest and keeps running). The step is made from the next snapshot on (a new size starts the interpolation's history again: one present without a generated frame)
 static int fg_level_down(void) {
     int l = atomic_load(&g_fg_level); double px = (double)atomic_load(&g_fg_shown_px);
-    if (fg_fixed() || !px) return 0;
-    for (int n = l + 1; n < FG_LEVELS; n++) if (fg_size_at(px, n) < fg_size_at(px, l)) { atomic_store(&g_fg_level, n); return 1; }
-    return 0;
+    if (fg_fixed() || l + 1 >= FG_LEVELS || !px || !(fg_size_at(px, l + 1) < fg_size_at(px, l))) return 0;
+    atomic_store(&g_fg_level, l + 1); return 1;
 }
 static double fg_size(void) {   // the factor for the screen (the drawable), as fx_mode asks before the first picture: below 1 when frames may be made smaller than shown
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer(); CGSize ds = layer ? layer.drawableSize : CGSizeZero;
@@ -17316,9 +17341,8 @@ static void fg_keep(id<MTL4CommandBuffer> cb, int k, int pk, id<MTLTexture> gen)
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch visibilityOptions:resource_vis()];   // after MetalFX's encoders
     [ce setArgumentTable:g_fgmv_args];
     fgmv_bind(ce, FGMV_STILL, col, prev, g_fg_still, nil); fgmv_grid(ce, g_fg_still.width, g_fg_still.height); fgmv_step(ce);
-    // No patches from the present where the motion is not trusted (fgmv_conf, X13-FF3): its squares and half-shifted cells showed as blocks over the generated frame on camera
-    // turns, and X9, which pasted nothing, had the cleaner picture (the owner). The interpolator's own picture there; only the still HUD is kept
-    fgmv_bind(ce, FGMV_HUD, g_fg_still, g_fg_keep, nil, nil); fgmv_grid(ce, g_fg_keep.width, g_fg_keep.height); fgmv_step(ce);
+    fgmv_bind(ce, FGMV_CONF, g_snap[k].lum, g_snap[pk].lum, g_fg_motion, g_fg_conf); fgmv_grid(ce, g_fg_conf.width, g_fg_conf.height); fgmv_step(ce);
+    fgmv_bind(ce, FGMV_HUD, g_fg_still, g_fg_keep, g_fg_conf, nil); fgmv_grid(ce, g_fg_keep.width, g_fg_keep.height); fgmv_step(ce);
     fgmv_bind(ce, FGMV_PSTILL, col, prev, prev2, g_fg_pmask); fgmv_grid(ce, col.width, col.height); fgmv_step(ce);
     fgmv_bind(ce, FGMV_KEEP, col, g_fg_keep, gen, g_fg_pmask); [g_fgmv_args setTexture:g_fg_motion.gpuResourceID atIndex:4]; fgmv_grid(ce, gen.width, gen.height);
     [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the present reads gen

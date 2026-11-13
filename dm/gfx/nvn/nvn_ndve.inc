@@ -21,11 +21,12 @@ static const char k_ndve_keys[NDVE_N][17] = {"49dff010b9832251", "ba079f68ae288d
 typedef struct { uint32_t W, H, tiles_x, tiles_y; } ndve_args;
 enum { NT_X0, NT_A, NT_S16, NT_B32, NT_S32, NT_E32, NT_C64, NT_D64, NT_N };
 static const int k_ndve_t[NT_N][3] = {{960, 540, 16}, {960, 540, 16}, {960, 540, 16}, {480, 270, 32}, {480, 270, 32}, {480, 270, 32}, {240, 135, 64}, {240, 135, 64}};
-enum { NK_PACK, NK_C16, NK_C32, NK_C64, NK_D16, NK_D32, NK_U64, NK_U32, NK_OUT, NK_LUMA, NK_RS, NK_CMP, NK_N };
-static const char *k_ndve_kern[NK_N] = {"pack_input", "conv3s_16_16", "conv3s_32_32", "conv3s_64_64", "down_16_32", "down_32_64", "up_64_32", "up_32_16", "out_16", "rs_luma", "resample", "cmp_img"};
-static const int k_ndve_ry[NK_N] = {0, 4, 2, 1, 2, 1, 1, 2, 4, 0, 0, 0};
+enum { NK_PACK, NK_C16, NK_C32, NK_C64, NK_D16, NK_D32, NK_U64, NK_U32, NK_OUT, NK_LUMA, NK_RS, NK_CMP, NK_COPY, NK_RSL, NK_N };
+static const char *k_ndve_kern[NK_N] = {"pack_input", "conv3s_16_16", "conv3s_32_32", "conv3s_64_64", "down_16_32", "down_32_64", "up_64_32", "up_32_16", "out_16", "rs_luma", "resample", "cmp_img",
+    "pic_copy", "resample_lite"};
+static const int k_ndve_ry[NK_N] = {0, 4, 2, 1, 2, 1, 1, 2, 4, 0, 0, 0, 0, 0};
 // each kernel's weights: taps, input channels, output channels (w[tap][k][n] halves), then N biases
-static const int k_ndve_shape[NK_N][3] = {{0, 0, 0}, {9, 16, 16}, {9, 32, 32}, {9, 64, 64}, {4, 16, 32}, {4, 32, 64}, {4, 64, 32}, {4, 32, 16}, {9, 16, 16}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+static const int k_ndve_shape[NK_N][3] = {{0, 0, 0}, {9, 16, 16}, {9, 32, 32}, {9, 64, 64}, {4, 16, 32}, {4, 32, 64}, {4, 64, 32}, {4, 32, 16}, {9, 16, 16}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
 typedef struct { int k, in, out, skip, layer; } ndve_layer;   // layer: the game's dispatch it stands for (its position in k_ndve_keys)
 static const ndve_layer k_ndve_l[] = {
     {NK_PACK, -1, NT_X0, -1, 0}, {NK_C16, NT_X0, NT_A, -1, 1}, {NK_C16, NT_A, NT_S16, -1, 2}, {NK_D16, NT_S16, NT_B32, -1, 3}, {NK_C32, NT_B32, NT_S32, -1, 4},
@@ -63,6 +64,12 @@ static struct {
 static int ndve_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NDVE_ENGINE", 1); return m; }   // on by default; 0 off, ab (DM_AB phases)
 // DM_NDVE_ENGINE=check: the game's dispatches run, and the engine computes the same frame beside them into images of its own, compared with the game's (logged every 300 frames)
 static int ndve_check(void) { static int c = -1; if (c < 0) { const char *e = getenv("DM_NDVE_ENGINE"); c = e && !strcmp(e, "check"); if (c) MLOG("DM_NDVE_ENGINE=check: the game's movie network runs, and the host's beside it, compared"); } return c; }
+// DM_NDVE_LITE (on by default): the movie without the network. Its U-Net only adds a learned correction to the converted picture (out_16: picture + D + bias), and the
+// resampler only adds a learned delta to a bilinear sample (resample: s + delta), so the light path writes the picture as it is (pic_copy) and resamples it bilinearly with
+// the game's dither and flip (resample_lite). The network took 11.3 ms and its resampler 3.8 ms of an M5's GPU each title-screen frame (one profiled frame in 300, Mac run,
+// render scale 0.6): the title and opening movies held the frame at 16.6-17.3 ms on the Mac and 17-18.5 ms on an iPhone (log 21, frames 0-600), short of 60 fps. The light
+// path takes well under 1 ms; the movie is the decoded 1080p AV1 frame, a little softer. DM_NDVE_LITE=0 runs the full network (the host's kernels, DM_NDVE_ENGINE)
+static int ndve_lite(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NDVE_LITE"); v = !(e && *e && !atoi(e)) && !ndve_check(); MLOG("NDVE engine: %s", v ? "light movie path (the picture without the network, resampled bilinearly; DM_NDVE_LITE=0 runs the network)" : "the full movie network (DM_NDVE_LITE=0)"); } return v; }
 static int ndve_index(NvShader *cs, int from) { for (int i = from; i < NDVE_N; i++) if (!strncmp(cs->key, k_ndve_keys[i], 16)) return i; return -1; }
 // Pipelines and tensors, made once in the background; the game's dispatches run until they are ready
 static void ndve_build(void) {
@@ -152,6 +159,17 @@ static void ndve_encode(id<MTLTexture> rgba, id<MTLTexture> out, uint64_t wgpu) 
     enc_c_end(ce);
     args_dirty_all();
 }
+// DM_NDVE_LITE: the picture into the network's image as it is (no correction added)
+static void ndve_encode_lite(id<MTLTexture> rgba, id<MTLTexture> out) {
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
+    id<MTL4ArgumentTable> at = g_nd.at; [ce setArgumentTable:at];
+    [ce setComputePipelineState:g_nd.ps[NK_COPY]]; [at setTexture:rgba.gpuResourceID atIndex:0]; [at setTexture:out.gpuResourceID atIndex:1];
+    [ce dispatchThreadgroups:MTLSizeMake(1920 / 32, (1080 + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    [ce barrierAfterStages:MTLStageDispatch | MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
+    enc_c_end(ce);
+    args_dirty_all();
+}
 // The resampler 4f41ccf2: luma pre-pass, then one SIMD-group an 8x8 output block
 static int ndve_resample(NvShader *cs, id<MTLTexture> into) {
     id<MTLTexture> pic = ndve_tex(cs, NVN_RB_TEX, 0), dith = ndve_tex(cs, NVN_RB_TEX, 3), out = ndve_tex(cs, NVN_RB_IMG, 1);
@@ -166,6 +184,13 @@ static int ndve_resample(NvShader *cs, id<MTLTexture> into) {
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
     id<MTL4ArgumentTable> at = g_nd.at; [ce setArgumentTable:at];
+    if (!into && ndve_lite()) {   // bilinear, the game's dither and flip, no delta
+        [ce setComputePipelineState:g_nd.ps[NK_RSL]]; [at setAddress:cb.gpuAddress + co atIndex:3];
+        [at setTexture:pic.gpuResourceID atIndex:0]; [at setTexture:dith.gpuResourceID atIndex:1]; [at setTexture:out.gpuResourceID atIndex:2];
+        [ce dispatchThreadgroups:MTLSizeMake(2560 / 32, 1440 / 8, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+        [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
+        enc_c_end(ce); args_dirty_all(); return 1;
+    }
     [ce setComputePipelineState:g_nd.ps[NK_LUMA]]; [at setTexture:pic.gpuResourceID atIndex:0]; [at setAddress:g_nd.luma.gpuAddress atIndex:1];
     [ce dispatchThreadgroups:MTLSizeMake(60, 135, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
     [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:resource_vis()];
@@ -247,9 +272,9 @@ static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
     if (rgba_id != g_nd.pic) return ndve_fail(cs, "the picture added to the network's output is not the one its first layer read");
     if (!mtl_gpu_addr(g_nd.w0, NDVE_WBYTES, &wb, &wo, &wgpu)) return ndve_fail(cs, "the weight table is in no memory pool");
     if (chk && !g_nd.shadow) g_nd.shadow = ndve_shadow(out);
-    ndve_encode(rgba, chk ? g_nd.shadow : out, wgpu);
+    if (!chk && ndve_lite()) ndve_encode_lite(rgba, out); else ndve_encode(rgba, chk ? g_nd.shadow : out, wgpu);
     if (chk) g_nd.game_out = out;   // compared once the game's 5a7d69b0 has written it, at 4f41ccf2
     g_nd.pos = 13;   // the resampler next
-    if (!g_nd.frames++) MLOG("NDVE engine: first movie frame by the engine (%llu dispatches skipped)", (unsigned long long)g_nd.skipped);
+    if (!g_nd.frames++) MLOG("NDVE engine: first movie frame by the engine (%llu dispatches skipped)%s", (unsigned long long)g_nd.skipped, !chk && ndve_lite() ? ", light path" : "");
     (void)dp; return !chk;
 }

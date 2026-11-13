@@ -165,13 +165,14 @@ def wide_view(ctx):
     # fallback (main+0x14fc7e0) returns it, so with the wider output the 3D was drawn 16:9 and stretched sideways, about 22 % wide on a 2.18:1 iPhone (the owner's
     # screenshot: Link, Zelda and Navi fat; PR #1460 at 21:9 on a Mac had said the camera takes its aspect from the render size). Each stub keeps the game's 16:9 in w8,
     # then takes the state page's float at +0x110 (the output's width / height, loader.c) when it is not 0. x16 is the scratch register: none of the three uses it
-    for site, what in ((0x9b5f38, 'camera projection constructor'), (0x2e1be40, 'second camera projection constructor'), (0x14fc7e4, 'aspect getter fallback')):
+    for site, what, mark in ((0x9b5f38, 'camera projection constructor', 0x128), (0x2e1be40, 'second camera projection constructor', 0x12c), (0x14fc7e4, 'aspect getter fallback', 0x130)):
         ctx.site(site, (0x72A7FC68).to_bytes(4, 'little').hex())   # movk w8,#0x3fe3,lsl #16 (16:9 = 0x3fe38e39)
         start = here(); emit(0x72A7FC68)                       # movk w8,#0x3fe3,lsl #16: the game's 16:9
         emit(ADRP(16, here(), ctx.state))
         emit(0xB9411210)                                        # ldr w16,[x16,#0x110]
         emit(0x34000050)                                        # cbz w16,+8 (0: 16:9 kept)
         emit(0x2A1003E8)                                        # mov w8,w16
+        emit(ADRP(16, here(), ctx.state)); emit(0xB9000000 | ((mark // 4) << 10) | 16 << 5 | 8)   # str w8,[x16,#mark]: the aspect it took, for the host's log (loader.c dm_wide_note)
         emit(B(here(), site + 4))
         ctx.put(site, [B(site, start)], f'wide view: {what} aspect from the state page (0: 16:9)')
     # The 2D canvas: main+0xe8303c stores a fixed 1920 x 1080 as the layout canvas's size (+0xe54 / +0xe58) unless one of two flags takes it from the display, so the HUD and
@@ -184,8 +185,86 @@ def wide_view(ctx):
     emit(0xB9411610)                                            # ldr w16,[x16,#0x114]
     emit(0x34000050)                                            # cbz w16,+8 (0: 1920 kept)
     emit(0x2A1003E8)                                            # mov w8,w16
+    emit(ADRP(16, here(), ctx.state)); emit(0xB9012608)         # str w8,[x16,#0x124]: the canvas width this path stored (float bits), for the host's log
     emit(B(here(), site + 4))
     ctx.put(site, [B(site, start)], 'wide view: the 2D canvas width from the state page (0: 1920)')
+    # Three more cameras build the same 16:9 aspect beside a 0.1 near plane (main+0xe07154 w8, the far plane 10000; main+0x27b13f8 w9 and main+0x2e1cb84 w9, a projection set up on
+    # the stack): the constructors above are what the field and town cameras take (a Mac run at 2.174:1: 2.1778 in both, Navi's glow round, 34 x 35 px), and these are the others
+    # (an event or special view's camera), widened the same way so no 3D view stays 16:9. Each keeps the game's 16:9 in its register unless the state page's +0x110 is set
+    for site, rd, what in ((0xe07154, 8, 'third camera'), (0x27b13f8, 9, 'fourth camera'), (0x2e1cb84, 9, 'fifth camera')):
+        ctx.site(site, (0x72A7FC60 | rd).to_bytes(4, 'little').hex())   # movk w<rd>,#0x3fe3,lsl #16
+        start = here(); emit(0x72A7FC60 | rd)                  # the game's 16:9 high half
+        emit(ADRP(16, here(), ctx.state))
+        emit(0xB9411210)                                        # ldr w16,[x16,#0x110]
+        emit(0x34000050)                                        # cbz w16,+8 (0: 16:9 kept)
+        emit(0x2A1003E0 | rd)                                   # mov w<rd>,w16
+        emit(B(here(), site + 4))
+        ctx.put(site, [B(site, start)], f'wide view: the {what}\'s aspect from the state page (0: 16:9)')
+    # The world-to-layout mapping: a point's place on screen (-1 to 1) times 1920 x 1080 gives its place in the game's 3840x2160 2D layout, where a speech bubble or a marker
+    # over a character is drawn (main+0x20c2b0, +0x20c99c, +0x215fb0: mov w8,#1920.0, fmov s0,w8, then times the x). With Wide view the host draws that layout at its own shape in
+    # the middle 16:9 of the screen (nvn_mtl.m wide2d_fix), so the x is taken times the 1080-high output width (2352.0, state +0x114) in place of 1920: the screen's width in
+    # layout units, and a bubble stays over its character to the screen's edges. 0 there (Wide view off): the game's 1920. x16 is free at all three
+    for site in (0x20c2b0, 0x20c99c, 0x215fb0):
+        ctx.site(site, (0x52A89E08).to_bytes(4, 'little').hex())   # mov w8,#0x44f00000 (1920.0)
+        start = here(); emit(0x52A89E08)
+        emit(ADRP(16, here(), ctx.state))
+        emit(0xB9411610)                                        # ldr w16,[x16,#0x114]
+        emit(0x34000050)                                        # cbz w16,+8 (0: 1920 kept)
+        emit(0x2A1003E8)                                        # mov w8,w16
+        emit(B(here(), site + 4))
+        ctx.put(site, [B(site, start)], 'wide view: the world-to-layout x scale from the state page (0: 1920)')
+    # The aspect the 3D draws with: the renderer copies its view's camera (near, far, field of view and aspect at +0x1c8..+0x1d4 of it, 0xa2 bytes, main+0x4c6388) into its own
+    # at +0x3118, and main+0x335650 builds from that copy the camera constants every 3D pass reads (near, far, aspect, the projection and the frustum; copied into the uniform
+    # buffer at main+0x660aac). Mac runs with the host's write watch (DM_CTL watch, nvn_mtl.m DM_WATCH_SCENE) on each: the uniform block from main+0x660aac, the renderer's copy
+    # only from main+0x4c6388, the view's camera never during play, its aspect 0x3fe38e3b from before: the decimal 1.777778 of the game's camera data, which no 16:9 constant
+    # in the code (the constructors' above, the parameter copy's) ever reached; Link 1.25 times too wide on Wide view. After the copy (main+0x4c638c, mov w8,#0x31c0 before
+    # the constants are built) an aspect from 1.75 to 1.875 (bits >> 20 == 0x3fe) is taken as the output's when Wide view is on (state +0x110): the projection, the frustum and
+    # everything built from them follow. x16, x17 and the flags are free there (a call follows)
+    site = 0x4c638c
+    ctx.site(site, (0x52863808).to_bytes(4, 'little').hex())   # mov w8,#0x31c0
+    start = here()
+    emit(0x52862490)                                            # mov w16,#0x3124          the renderer camera's aspect (+0x2f50 + 0x1d4)
+    emit(0xB8706A71)                                            # ldr w17,[x19,x16]
+    emit(0x53147E31)                                            # lsr w17,w17,#20
+    emit(0x710FFA3F)                                            # cmp w17,#0x3fe          1.75 to 1.875
+    emit(0x540000A1)                                            # b.ne +20                (another aspect: as it is)
+    emit(ADRP(17, here(), ctx.state))
+    emit(0xB9411231)                                            # ldr w17,[x17,#0x110]    the output's aspect (0: Wide view off)
+    emit(0x34000051)                                            # cbz w17,+8
+    emit(0xB8306A71)                                            # str w17,[x19,x16]
+    emit(0x52863808)                                            # mov w8,#0x31c0          the original
+    emit(B(here(), site + 4))
+    ctx.put(site, [B(site, start)], 'wide view: the renderer camera\'s 16:9 aspect taken as the output\'s before its constants are built')
+    # The projections the 3D draws with: sead::PerspectiveProjection keeps its aspect at +0xb0 (near +0x98, far +0x9c, the tan of the half angle +0xac) and builds its matrix
+    # from it, and the game sets that aspect from its cameras' data (1.777778, the 0x3fe38e3b a Mac run's write watch found in every camera, whose projection stayed 16:9 with
+    # Wide view on: Link 1.25 times too wide). Eleven stores set it: the constructor (main+0x3485c64), the setter (main+0xea4b20, a pair whose second word is the aspect), and the
+    # cameras' updates (the others). At each, a value from 1.75 to 1.875 (bits >> 20 == 0x3fe) is stored as the output's aspect when Wide view is on (state +0x110); any other ratio
+    # (a cube map's, a shadow map's, one already wide) as the game gives it. The stubs keep the flags (sub and cbnz, no compare: some sites carry live flags) and the source
+    # register (the wide value is stored from w16); x16 and x17 are free at each (a call or a store follows, none reads them)
+    for site, rt, rn, pair in ((0x3485c64, 3, 0, 0), (0xea4b20, 8, 19, 1), (0x4c533c, 0, 20, 0), (0x653bd4, 0, 8, 0), (0x6545f4, 0, 26, 0), (0x28e72a4, 0, 8, 0),
+                               (0x2dd7164, 0, 22, 0), (0x2e1bb6c, 0, 23, 0), (0x2e1c7d0, 0, 21, 0), (0x3b50988, 0, 0, 0), (0x3b50b50, 0, 24, 0)):
+        orig = 0x2D15A260 if pair else 0xBD000000 | (0xb0 // 4) << 10 | rn << 5 | rt   # stp s0,s8,[x19,#0xac] / str s<rt>,[x<rn>,#0xb0]
+        ctx.site(site, orig.to_bytes(4, 'little').hex())
+        start = here()
+        emit(0x1E260000 | rt << 5 | 17)                         # fmov w17,s<rt>          the aspect's bits
+        emit(0x53147E31)                                        # lsr w17,w17,#20
+        emit(0x510FFA31)                                        # sub w17,w17,#0x3fe      0 for 1.75 to 1.875 (no flags)
+        emit(0x35000091)                                        # cbnz w17,+16            (another ratio: the game's store)
+        emit(ADRP(16, here(), ctx.state))
+        emit(0xB9411210)                                        # ldr w16,[x16,#0x110]    the output's aspect (0: Wide view off)
+        emit(0x35000070)                                        # cbnz w16,+12            (the wide store)
+        emit(orig)                                              # the game's store
+        emit(B(here(), site + 4))
+        if pair: emit(orig)                                     # the pair as the game stores it, then its aspect word replaced
+        emit(0xB9000000 | (0xb0 // 4) << 10 | rn << 5 | 16)     # str w16,[x<rn>,#0xb0]  the output's aspect
+        emit(B(here(), site + 4))
+        ctx.put(site, [B(site, start)], 'wide view: a perspective projection\'s 16:9 aspect stored as the output\'s')
+    # A note of the camera aspect getter's main path (main+0x14fc7b4, ldr d0,[x8]: the two floats it copies from its source object) at +0x138, to tell which path the cameras take
+    site = 0x14fc7b4
+    ctx.site(site, (0xFD400100).to_bytes(4, 'little').hex())   # ldr d0,[x8]
+    start = here(); emit(0xFD400100); emit(ADRP(16, here(), ctx.state)); emit(0xFD009E00)   # ldr d0,[x8]; str d0,[x16,#0x138]
+    emit(B(here(), site + 4))
+    ctx.put(site, [B(site, start)], 'wide view: a note of the camera aspect getter\'s main path (state +0x138)')
 
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0

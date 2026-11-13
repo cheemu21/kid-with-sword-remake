@@ -170,16 +170,15 @@ int main(int argc, char **argv) { @autoreleasepool {
     g_test_layer = [CAMetalLayer layer]; g_test_layer.device = g_dev; g_test_layer.drawableSize = CGSizeMake(W, H); g_test_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     mtl_present_screen(W, H); mtl_present_layer(W, H);   // the picture's shape, as a front end reports it
     CHECK("frame generation on", fg_on());
-    // the pixel budget (no DM_FRAMEGEN_SCALE in this mode): none at its first step (X9's picture as shown, Wide view's and an iPad's too); 1920x1080 at the second, where
-    // Wide view's and an iPad's are smaller, never below 0.5; a picture within 10 % of a step's budget as shown
-    CHECK("budget: 1920x1080 as shown", fg_size_for(1920, 1080) == 1);
+    // the pixel budget (no DM_FRAMEGEN_SCALE in this mode), 1440x810 at its first step: a 16:9 phone picture at 0.75, Wide view's and an iPad's smaller, never below 0.5;
+    // a picture within 10 % of it as shown
+    CHECK("budget: 1920x1080 at 0.75", fabs(fg_size_for(1920, 1080) - 0.75) < 1e-9);
     CHECK("budget: 1280x720, under it, as shown", fg_size_for(1280, 720) == 1);
     CHECK("budget: 1500x830, within 10 % of it, as shown", fg_size_for(1500, 830) == 1);
-    CHECK("budget: Wide view's 2352x1080 as shown at first", fg_size_for(2352, 1080) == 1);
-    CHECK("budget: an iPad's 2732x2048 as shown at first", fg_size_for(2732, 2048) == 1);
-    CHECK("budget steps: Wide view's 2352x1080 at about 0.90 on the second", fabs(fg_size_at(2352 * 1080, 1) - 0.904) < 0.005);
-    CHECK("budget steps: 1920x1080 as shown on the second, 0.75 on the third, 0.625 on the fourth, 0.5 on the fifth", fg_size_at(1920 * 1080, 1) == 1 && fabs(fg_size_at(1920 * 1080, 2) - 0.75) < 1e-9 && fabs(fg_size_at(1920 * 1080, 3) - 0.625) < 1e-9 && fabs(fg_size_at(1920 * 1080, 4) - 0.5) < 1e-9);
-    CHECK("budget steps: Wide view's floor on the fifth", fg_size_at(2352 * 1080, 4) == 0.5);
+    CHECK("budget: Wide view's 2352x1080 at about 0.68", fabs(fg_size_for(2352, 1080) - 0.678) < 0.005);
+    CHECK("budget: an iPad's 2732x2048 at 0.5, the floor", fg_size_for(2732, 2048) == 0.5);
+    CHECK("budget steps: 1920x1080 at 0.625 on the second, 0.5 on the third", fabs(fg_size_at(1920 * 1080, 1) - 0.625) < 1e-9 && fabs(fg_size_at(1920 * 1080, 2) - 0.5) < 1e-9);
+    CHECK("budget steps: Wide view's floor on the third", fg_size_at(2352 * 1080, 2) == 0.5);
     CHECK("snapshots on with a ring of 3", mtl_snap_on() && g_snap_n == 3);
     // The present thread takes the presents (no display link): each slot's generated frame against the presents before
     int ok[6];
@@ -270,16 +269,15 @@ int main(int argc, char **argv) { @autoreleasepool {
         int l1 = atomic_load(&g_fg_level);
         LATE2(76, big); int l2 = atomic_load(&g_fg_level);
         LATE2(78, big); int l3 = atomic_load(&g_fg_level);
-        LATE2(66, big); int l4 = atomic_load(&g_fg_level);
         { tex_t t = frame(79); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); tick(); tick(); }
         tex_t t5 = frame(80); present_enqueue(&t5, 1 / 30.0, NULL, 0, NULL); copied(); int still_made = g_snap[last_slot()].gen_ok; tick(); tick();
-        printf("frames dropping on a 1920x1080 picture: step %d, step %d, step %d, step %d; generated frames still made %d\n", l1 + 1, l2 + 1, l3 + 1, l4 + 1, still_made);
-        CHECK("frames dropping on and on make the frames lighter (1920x1080's step, no smaller for this picture, passed over), and past the last step it keeps running", l1 == 2 && l2 == 3 && l3 == 4 && l4 == 4 && still_made);
+        printf("frames dropping on a 1920x1080 picture: step %d, step %d, step %d; generated frames still made %d\n", l1 + 1, l2 + 1, l3 + 1, still_made);
+        CHECK("frames dropping on and on make the frames lighter, and past the last step it keeps running", l1 == 1 && l2 == 2 && l3 == 2 && still_made);
         calm(); g_fg_up_need = 4; g_fg_lvl_calm = 0; steady(80, 5);
         int lu = atomic_load(&g_fg_level); uint64_t up_at = g_fg_up_at;
-        CHECK("presents in time take a step back up", lu == 3 && up_at);
+        CHECK("presents in time take a step back up", lu == 1 && up_at);
         LATE2(85, big); LATE2(87, big);
-        CHECK("a step down soon after a step up doubles the calm it takes to go up again", atomic_load(&g_fg_level) == 4 && g_fg_up_need == 8);
+        CHECK("a step down soon after a step up doubles the calm it takes to go up again", atomic_load(&g_fg_level) == 2 && g_fg_up_need == 8);
         calm(); steady(89, 3); atomic_store(&g_fg_level, 0);
         LATE2(92, (uint64_t)W * H);
         CHECK("a picture under the budget: no step makes it smaller, the interpolation keeps running", atomic_load(&g_fg_level) == 0 && g_snap[last_slot()].gen_ok);

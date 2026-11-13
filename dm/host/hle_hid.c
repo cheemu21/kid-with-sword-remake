@@ -228,6 +228,8 @@ void hid_keys_init(void) {
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
+// probe.c (the Mac host): DM_CTL watch; elsewhere this weak default (a weak declaration alone left an undefined symbol the Darwin linker refuses)
+__attribute__((weak)) void probe_watch_at(uint64_t at, uint64_t len) { (void)at; (void)len; LOG("DM_CTL: watch: this build has no write watch (the Mac host only)"); }
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
     if (getenv("DM_PREV_PROGRAM") || getenv("DM_RELAUNCH")) {   // oe::ExecuteProgram or oe::RequestToRelaunchApplication started this program in the last one's place: that program acted on what the file holds
@@ -254,6 +256,8 @@ static void *ctl_main(void *arg) {
                     void dm_gfx_bufsnap(const char *key, uint64_t a, size_t n, const char *path); char key[32] = {0}, path[512] = {0}; unsigned long long a = 0, n = 0;
                     if (sscanf(line + 8, "%31s %llx %lli %511s", key, &a, &n, path) == 4) dm_gfx_bufsnap(key, a, (size_t)n, path); else LOG("DM_CTL: bufsnap <shader key> <hex address> <bytes> <path>"); continue; }
                 if (!strncmp(line, "peek ", 5)) { void dm_ctl_peek(uint64_t a, int n); char *e2; uint64_t a = strtoull(line + 5, &e2, 16); dm_ctl_peek(a, (int)strtol(e2, NULL, 0)); continue; }
+                if (!strncmp(line, "watch ", 6)) { char *e2; uint64_t a = strtoull(line + 6, &e2, 16), n = strtoull(e2, NULL, 0);   // the write watch (probe.c, Mac) armed now on <hex address> <length>, once
+                    probe_watch_at(a, n ? n : 4); continue; }
                 if (!strncmp(line, "memdump ", 8)) { void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path); char *e2, *e3; uint64_t a = strtoull(line + 8, &e2, 16), n = strtoull(e2, &e3, 0);
                                                      while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, e3); continue; }
                 if (!strncmp(line, "cvari ", 6)) { void dm_ctl_cvar_i32(uint64_t off, int32_t v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_i32(off, (int32_t)strtol(e2, NULL, 0)); continue; }

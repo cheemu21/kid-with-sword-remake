@@ -352,6 +352,14 @@ static void *poll_run(void *p) {
     }
     return NULL;
 }
+// The same watch armed at run time on bytes found then (nvn_mtl.m DM_WATCH_SCENE: the aspect in the first camera constants block bound), once: their address moves from run to run
+void probe_watch_at(uint64_t at, uint64_t len) {
+    static _Atomic int once; if (atomic_exchange(&once, 1)) return;
+    g_wpsz = (uint64_t)getpagesize(); g_wlen = len; g_wat = at; g_wpg = at & ~(g_wpsz - 1);
+    dm_fault_hook_register(watch_fault);
+    pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
+    LOG("write watch armed at run time on %#llx + %#llx (host page %#llx)", (unsigned long long)g_wat, (unsigned long long)g_wlen, (unsigned long long)g_wpg);
+}
 static void watch_install(void) {
     { const char *e = getenv("DM_PROBE_POLL");
       if (e) { char *end; g_pheap = !strncmp(e, "heap+", 5); if (g_pheap) e += 5; g_palias = !strncmp(e, "alias+", 6); if (g_palias) e += 6; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;

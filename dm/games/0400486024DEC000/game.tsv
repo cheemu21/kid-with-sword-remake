@@ -76,3 +76,7 @@ upscaler_chain	f8965bffbdf51d78,d17eefaff4f0bc23,a335c1db6270c355>aad7ea7e5c02f4
 dispatch_overlap	on
 # amiibo: the game's Game/AmiiboSetting file in three variants (scripts/oot_amiibo_overlay.py into the romfs_overlay folder): the daily limit off, the drop chances doubled, or both
 amiibo_overlay	on
+# The 3D views' size at render scale 1.0, docked then handheld, for the launcher's Render scale row in pixels (settings.py render_base): the game renders its 3D at 65/64 of the
+# output's height times the scale (a Mac run and the owner's iPhone logs at 0.6: handheld 1169x658 for 1920x1080, Wide view's 1432x658 for 2352x1080, docked 1909x877 for 3136x1440)
+# and its width from that height and the output's shape (LauncherSettings.swift rangeLabel takes Wide view's shape from the screen)
+render_base	2599x1462 1949x1097

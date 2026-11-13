@@ -289,6 +289,24 @@ kernel void resample(device const half *luma [[buffer(0)]], device const half *w
     }
 }
 
+// DM_NDVE_LITE (nvn_ndve.inc ndve_lite): the movie without the network. pic_copy: the converted picture (RGBA8 1920x1080) into the network's RGB10A2 image as it is,
+// with no correction added; resample_lite: the resampler's bilinear sample of it at each output pixel's centre, its dither and its vertical flip, with no delta
+kernel void pic_copy(texture2d<float, access::read> rgba [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= 1920 || g.y >= 1080) return;
+    dst.write(rgba.read(g), g);
+}
+kernel void resample_lite(constant RsConst &cc [[buffer(3)]], texture2d<float, access::sample> pic [[texture(0)]], texture2d<float, access::read> dith [[texture(1)]],
+                          texture2d<float, access::write> dst [[texture(2)]], uint2 g [[thread_position_in_grid]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear, min_filter::nearest, mag_filter::linear, mip_filter::linear);
+    if (g.x >= 2560 || g.y >= 1440) return;
+    const float2 uv = float2((float(g.x) + 0.5f) * cc.s2.z, (float(g.y) + 0.5f) * cc.s2.w);
+    const float3 s = pic.sample(smp, uv, level(0.0f)).xyz;
+    const float3 off = fma(dith.read(uint2(g.x & 511, g.y & 511)).xyz, 2.0f, -1.0f);
+    const float3 k = rint(fma(s, 255.0f, off));
+    const uint yo = cc.c4.w ? uint(cc.c4.z - int(g.y)) : g.y;
+    dst.write(float4(k * 0.0039215688593685626983642578125f, 1.0f), uint2(g.x, yo));
+}
+
 // DM_NDVE_ENGINE=check: the game's image against the engine's, texel by texel: n[0] the texels that differ, n[1] the largest difference of a component (1/1023 of its range)
 kernel void cmp_img(texture2d<float, access::read> a [[texture(0)]], texture2d<float, access::read> b [[texture(1)]], device atomic_uint *n [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {
     if (g.x >= a.get_width() || g.y >= a.get_height()) return;

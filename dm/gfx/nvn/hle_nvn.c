@@ -2030,6 +2030,7 @@ static void tsummary(uint64_t frame) {
       if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
       g_presn = 0; }
     power_line(frame);
+    { void dm_wide_note(void); dm_wide_note(); }   // Wide view's notes from the game (below), when they change
     { static uint64_t prev[6], pf; uint64_t v[6]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
       if (pf && frame > pf) { double nf = (double)(frame - pf);
           LOG("[nvn] vertex bindings up to frame %llu: per frame address lookups %.0f / reused %.0f, vertex table writes %.0f / skipped %.0f, streams not 4-byte aligned copied %.1f (%.2f MB)", frame,
@@ -2140,6 +2141,18 @@ static _Atomic uint64_t g_itv2_since;   // start of the game's current run of ev
 // Frame step (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0): the game no longer picks an interval. The host hands it each frame's step in whole vsyncs
 // (fstep_tick, nvn_fstep.h) and presents follow the hold k it decides with it
 __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c; graphics unit tests have no loader
+// Wide view's notes (Ocarina of Time's patches.py wide_view, with DM_WIDE_VIEW): what the game's stubs took, written by them into the state page, logged when they change.
+// +0x120 the HUD canvas width on its display path (an integer), +0x124 on its fixed path (float bits), +0x128 / +0x12c the two camera projection constructors' aspect and
+// +0x130 the aspect getter's fallback (floats), +0x138 the two floats the getter's main path copies. 0: that path has not run. To tell which paths give the HUD and the 3D their shape
+void dm_wide_note(void) {
+    if (!dm_fps_state || !__atomic_load_n((uint32_t *)(dm_fps_state + 0x104), __ATOMIC_RELAXED)) return;
+    static uint8_t last[0x20]; uint8_t v[0x20]; memcpy(v, dm_fps_state + 0x120, sizeof v);
+    if (!memcmp(v, last, sizeof v)) return;
+    memcpy(last, v, sizeof v);
+    uint32_t cd; float cf, a1, a2, a3, g0, g1; memcpy(&cd, v, 4); memcpy(&cf, v + 4, 4); memcpy(&a1, v + 8, 4); memcpy(&a2, v + 12, 4); memcpy(&a3, v + 16, 4); memcpy(&g0, v + 24, 4); memcpy(&g1, v + 28, 4);
+    LOG("[nvn] wide view notes: HUD canvas width %u on its display path, %.0f on its fixed path; camera aspect %.4f / %.4f in the constructors, %.4f in the getter's fallback; getter main path %.4f %.4f",
+        cd, cf, a1, a2, a3, g0, g1);
+}
 __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine frame limits in game memory (Monster Hunter Rise); graphics unit tests have no host
 static int g_engine_stub = 1;   // the weak dm_fps_lock_engine's answer, for graphics unit tests (t_nvn sets it)
 __attribute__((weak)) int dm_fps_lock_engine(void) { return g_engine_stub; }   // hle_fpslock.c: the host writes fps_target into an engine limiter of this main

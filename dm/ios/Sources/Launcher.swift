@@ -236,6 +236,10 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
     guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
     guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
     let model = LauncherModel(file.settings)
+    do {   // the screen's shape for the render scale's size in pixels with Wide view (LauncherSettings.swift rangeLabel), measured as front_ios.m does
+        let sz = UIScreen.main.bounds.size, lo = min(sz.width, sz.height)
+        if lo > 0 { LauncherModel.screenAspect = Double(max(sz.width, sz.height) / lo) }
+    }
     gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
     if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
     let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()

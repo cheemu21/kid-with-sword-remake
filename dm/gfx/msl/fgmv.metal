@@ -152,14 +152,21 @@ kernel void fgmv_conf(texture2d<half, access::read> cur [[texture(0)]], texture2
     }
     conf.write(half4(half(r)), g);
 }
-// Only the still HUD: X13-FF3 also took the present's own pixels where the motion was not trusted (fgmv_conf: 24x24 squares over a model moving its own way, cells shifted
-// half a step over ground on a camera turn), and those patches showed as blocks over the generated frame on camera turns; X9, which pasted nothing, had the cleaner picture
-// (the owner, FF3's log 18). There the interpolator's own picture is shown (fgmv_conf is no longer run)
-kernel void fgmv_hud(texture2d<half, access::read> st [[texture(0)]], texture2d<half, access::write> keep [[texture(1)]], uint2 g [[thread_position_in_grid]]) {
+kernel void fgmv_hud(texture2d<half, access::read> st [[texture(0)]], texture2d<half, access::write> keep [[texture(1)]], texture2d<half, access::read> conf [[texture(2)]],
+                     uint2 g [[thread_position_in_grid]]) {
     if (g.x >= keep.get_width() || g.y >= keep.get_height()) return;
     int2 mx = int2(st.get_width() - 1, st.get_height() - 1), gi = int2(g);
     half k = 0;
-    if (st.read(g).r > 0.5h)
+    // A block within one 1/8 pixel of motion of its own not trusted (fgmv_conf positive: a model moving its own way on a camera turn, what it uncovers): the present's own (1), over
+    // the 24x24 around it as in X13, so a model is taken whole from one moment. Cut to the 1/8 pixel alone, parts of a model came from the present and the cells beside them from the
+    // interpolation, and models twitched on camera turns (X14's first builds, the owner). Motion its neighbours share (negative: detail of the ground the camera turns over), in this
+    // 1/8 pixel alone: the present's own moved half its step (0.5, fgmv_keep), where X13's unmoved squares were the patches of texture on a camera turn
+    if (conf.get_width() > 1) {
+        int2 cm = int2(conf.get_width() - 1, conf.get_height() - 1), c = gi / 2;
+        for (int y = -1; y <= 1 && k < 1.0h; y++) for (int x = -1; x <= 1; x++) if (float(conf.read(uint2(clamp(c + int2(x, y), int2(0), cm))).r) > FGMV_BAD) { k = 1; break; }
+        if (k < 1.0h && float(conf.read(uint2(clamp(c, int2(0), cm))).r) < -FGMV_BAD) k = 0.5h;
+    }
+    if (k < 1.0h && st.read(g).r > 0.5h)
         for (int y = -3; y <= 3 && k < 1.0h; y++) for (int x = -3; x <= 3; x++) if (st.read(uint2(clamp(gi + int2(x, y), int2(0), mx))).r > 1.5h) { k = 1; break; }
     keep.write(half4(k), g);
 }
