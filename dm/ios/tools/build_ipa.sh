@@ -250,7 +250,7 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
 fi
 P=Payload/DmIOS.app
-SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit)
+SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit --skip $P/romfs_overlay)
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, offline HTML pages and nn::jit image under its own folder
   [ "${DM_COPY_ROMFS:-YES}" != NO ] || die "DM_COPY_ROMFS=NO: a game of several programs keeps its programs' files in the app"
   MAPS=("$P=$APP")
@@ -275,6 +275,17 @@ elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$R
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
 MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
+# Amiibo (a profile with amiibo.tsv: Ocarina of Time's in-game Amiibo menu, GameMenu.swift): the app's romfs_overlay holds that list and, with the profile's amiibo_overlay on, the
+# game's own Game/AmiiboSetting with every amiibo's daily limit off, made here from the player's RomFS image (scripts/oot_amiibo_overlay.py; nothing of the game is in the repository).
+# main.m serves it over the RomFS (DM_ROMFS_OVERLAY, hle_fs.c rom_overlay_expand) and points DM_AMIIBO at Documents/amiibo.txt. A folder of its own, so no other replacement is packed
+if [ -f "$GD/amiibo.tsv" ]; then
+  AOV=$O/romfs_overlay; rm -rf "$AOV"; mkdir -p "$AOV" && cp "$GD/amiibo.tsv" "$AOV/" || die "amiibo overlay $AOV"
+  if grep -qE '^amiibo_overlay[[:space:]]+on' "$GD/game.tsv" && [ -f "$ROMFS" ]; then
+    if python3 "$DM/../scripts/oot_amiibo_overlay.py" "$ROMFS" "$AOV" > "$O/amiibo_overlay.log" 2>&1; then t "amiibo: the list and the game's amiibo file with no daily limit ($(head -1 "$O/amiibo_overlay.log"))"
+    else rm -rf "$AOV/amiibo-nolimit"; t "amiibo: the list only (scripts/oot_amiibo_overlay.py: $(tail -1 "$O/amiibo_overlay.log"))"; fi
+  else t "amiibo: the list only"; fi
+  MAPS+=("$P/romfs_overlay=$AOV")
+fi
   if [ -d "$(dirname "$ROMFS")/html" ]; then MAPS+=("$P/html=$(dirname "$ROMFS")/html"); t "offline HTML pages: $(dirname "$ROMFS")/html"; fi   # beside its RomFS, where the host finds them (hle_web.c)
   if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/jit=$(dirname "$ROMFS")/jit"); t "nn::jit image: $(dirname "$ROMFS")/jit"; fi
 fi

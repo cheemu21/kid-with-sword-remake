@@ -176,6 +176,19 @@ static const char *fwd_slashes(const char *p, char *buf, size_t n) {
 }
 static int norm_rest(const char *rest, char *out, size_t n);
 static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_t n);
+// DM_ROMFS_OVERLAY's folders, each preceded by its amiibo-nolimit/ subfolder where it has one: Ocarina of Time's Game/AmiiboSetting with every amiibo's daily limit off and the
+// resource size table entry it needs (scripts/oot_amiibo_overlay.py, which build_ipa.sh runs on the player's own RomFS image into the app's romfs_overlay). Only that subfolder: the
+// X line's per-mode resolution folders (handheld/, docked/, potato-*) are never served on this line, whose render scale is a patch (patches.py)
+static void rom_overlay_expand(const char *env, char *dst, size_t n) {
+    dst[0] = 0; char *roots = strdup(env); if (!roots) die("rom overlay allocation failed");
+    char *save = NULL;
+    for (char *root = strtok_r(roots, ":", &save); root; root = strtok_r(NULL, ":", &save)) {
+        char sub[1100]; struct stat st; snprintf(sub, sizeof sub, "%s/amiibo-nolimit", root);
+        if (!stat(sub, &st) && S_ISDIR(st.st_mode)) { if (dst[0]) strlcat(dst, ":", n); strlcat(dst, sub, n); LOG("fs rom overlay: %s (amiibo: daily limit off)", sub); }
+        if (dst[0]) strlcat(dst, ":", n); strlcat(dst, root, n);
+    }
+    free(roots);
+}
 // A path on an image mount: returns 1 with the mount in *mi and the entry in *k (-1 with errno set when there is none); 0 for a path on any other mount, or one an overlay folder (DM_ROMFS_OVERLAY) has, which then opens as a host file
 static int img_path(const char *p, int *mi, int64_t *k) {
     PATH_LOCK(); char fwd[1024]; p = fwd_slashes(p, fwd, sizeof fwd); const char *c = p ? strchr(p, ':') : NULL; if (!c) return 0;
@@ -203,7 +216,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
     const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
-    if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
+    if (overlay) rom_overlay_expand(overlay, g_mnt[g_nmnt].overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0, k = 0;
@@ -533,7 +546,7 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", 
     if (r == RES_OK && overlay) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) {
-            strlcpy(g_mnt[i].overlay, overlay, sizeof g_mnt[i].overlay); break;
+            rom_overlay_expand(overlay, g_mnt[i].overlay, sizeof g_mnt[i].overlay); break;
         }
     }
     return r;
