@@ -13,7 +13,7 @@ private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryK
 /// Cloud saves: an iCloud Drive folder shared with the Mac app (chosen in its settings window's
 /// Cloud saves too). The host brings the save in from there when the game starts and
 /// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
-private struct CloudSavesSection: View {
+struct CloudSavesSection: View {
     @State private var folder: String = ""
     @State private var note: String = ""
     @State private var picking = false
@@ -100,53 +100,25 @@ private struct LauncherView: View {
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
     @State private var report: SaveSyncReport?
     @State private var asking: SaveSyncReport.Step?
+    @State private var drawer = false
+    @State private var background = LauncherBackgroundStore.image()
+    @State private var statusLine = ""
+    // The quick tiles: the toggles players change most (the drawer has them too); a game without one shows the rest
+    private static let tiles = [("DM_FRAMEGEN", "Frame Generation", "waveform.path"), ("DM_COOL", "Cool Mode", "snowflake"), ("DM_WIDE_VIEW", "Wide View", "arrow.left.and.right"), ("DM_MIC", "Ocarina Mic", "mic")]
 
     var body: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                VStack(spacing: 16) {
-                    if let icon = appIcon() {
-                        Image(uiImage: icon).resizable().frame(width: 96, height: 96)
-                            .clipShape(RoundedRectangle(cornerRadius: 22))
-                            .accessibilityHidden(true)
-                    }
-                    Text((info("CFBundleDisplayName") as? String) ?? "Game")
-                        .font(.title.weight(.bold)).multilineTextAlignment(.center)
-                    Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
-                        .font(.callout).foregroundStyle(.secondary)
-                    playButton
+        ZStack {
+            LauncherBackdrop(image: background)
+            GeometryReader { g in
+                ZStack {
+                    titleBlock
+                    sideButtons
+                    bottomBar(width: g.size.width - 140)   // the room left of Play
                 }
-                .padding(16)
-                .frame(width: geometry.size.width / 3, height: geometry.size.height)
-                List {
-                    ForEach(m.sections, id: \.self) { section in
-                        let rows = m.rows(in: section)
-                        if !rows.isEmpty {
-                            Section(section) {
-                                ForEach(rows) { SettingRow(s: $0, m: m) }
-                            }
-                        }
-                    }
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
-                    }
-                    CloudSavesSection()
-                    Section {
-                        HStack {
-                            Text("Memory available")
-                            Spacer()
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .listStyle(.insetGrouped)
-                .contentMargins(.horizontal, 12, for: .scrollContent)
-                .frame(width: geometry.size.width * 2 / 3)
             }
+            .padding(.horizontal, 18).padding(.vertical, 14)
         }
+        .overlay(alignment: .trailing) { drawerOverlay }
         .preferredColorScheme(.dark)
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
             Button(r.localLabel(here: "iPhone")) { go(r.localChoice) }
@@ -159,6 +131,9 @@ private struct LauncherView: View {
             Button("Cancel", role: .cancel) {}
         } message: { r in Text(r.unreadableMessage(here: "iPhone")) }
         .task {
+            var stale: ObjCBool = false
+            let cloud = (dm_cloud_saves_path(&stale) ?? "").isEmpty ? nil : "Cloud Saves On"
+            statusLine = [launcherLastPlayed(), cloud].compactMap { $0 }.joined(separator: " · ")
             while !Task.isCancelled {
                 memory = os_proc_available_memory()
                 try? await Task.sleep(for: .seconds(2))
@@ -166,14 +141,86 @@ private struct LauncherView: View {
         }
     }
 
+    // the title over the picture
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Continue Your Journey").font(.footnote).foregroundStyle(LauncherTheme.soft)
+            Text(LauncherBackgroundStore.title()).font(.system(size: 28, weight: .bold)).foregroundStyle(LauncherTheme.text)
+                .shadow(color: .black.opacity(0.5), radius: 8, y: 2).lineLimit(1).minimumScaleFactor(0.6)
+            Text(statusLine).font(.footnote).foregroundStyle(LauncherTheme.soft).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+    // Play, and All Settings under it
+    private var sideButtons: some View {
+        VStack(spacing: 10) {
+            playButton
+            Button { withAnimation(.easeOut(duration: 0.25)) { drawer = true } } label: {
+                Label("All Settings", systemImage: "slider.horizontal.3").font(.footnote.weight(.semibold)).foregroundStyle(LauncherTheme.text)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(LauncherTheme.paleGold.opacity(0.3), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+    private var tileSettings: [(Setting, String, String)] {
+        Self.tiles.compactMap { t in m.settings.first(where: { $0.env == t.0 && $0.kind == "toggle" }).map { ($0, t.1, t.2) } }
+    }
+    // the dial and the quick tiles: in one row where it fits (an iPhone 18 Pro's 874 points), else the tiles two by two beside the dial (an iPhone Duo's 678), else above it
+    @ViewBuilder private func dial(_ w: CGFloat = 236) -> some View {
+        if let scale = m.settings.first(where: { $0.env == "DM_RENDER_SCALE" }) { HeatDial(m: m, scale: scale, width: w) }
+    }
+    private func tile(_ t: (Setting, String, String)) -> some View { QuickTile(m: m, s: t.0, title: t.1, icon: t.2) }
+    private var tileGrid: some View {
+        let rows = stride(from: 0, to: tileSettings.count, by: 2).map { Array(tileSettings[$0..<min($0 + 2, tileSettings.count)]) }
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(rows.indices, id: \.self) { r in HStack(spacing: 10) { ForEach(rows[r], id: \.0.env) { tile($0) } } }
+        }
+    }
+    private func bottomBar(width: CGFloat) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .bottom, spacing: 10) { dial(); ForEach(tileSettings, id: \.0.env) { tile($0) } }
+            HStack(alignment: .bottom, spacing: 10) { dial(200); tileGrid }
+            VStack(alignment: .leading, spacing: 10) { tileGrid; dial() }
+        }
+        .frame(maxWidth: max(width, 236), alignment: .bottomLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+    }
+    private func closeDrawer() { withAnimation(.easeOut(duration: 0.25)) { drawer = false } }
+    @ViewBuilder private var drawerOverlay: some View {
+        if drawer {
+            GeometryReader { g in
+                HStack(spacing: 0) {
+                    Color.black.opacity(0.001).onTapGesture(perform: closeDrawer)
+                    AllSettingsDrawer(m: m, close: closeDrawer, backgroundChanged: { background = LauncherBackgroundStore.image() }, memory: memory)
+                        .frame(width: max(360, g.size.width * 0.6))
+                }
+            }
+            .ignoresSafeArea(edges: .vertical)
+            .transition(.move(edge: .trailing))
+        }
+    }
+
     @ViewBuilder var playButton: some View {
-        let button = Button(action: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
-        if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
+        Button(action: start) {
+            Image(systemName: "play.fill").font(.system(size: 40, weight: .bold)).foregroundStyle(LauncherTheme.onGold).offset(x: 3)
+                .frame(width: 112, height: 112)
+                .background(LauncherTheme.gold, in: Circle())
+                .overlay(Circle().strokeBorder(LauncherTheme.paleGold, lineWidth: 4))
+                .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+        }
+        .buttonStyle(.plain)
+        .disabled(checking)
+        .accessibilityLabel("Play")
         if checking {
             VStack(spacing: 6) {
-                HStack(spacing: 6) { ProgressView(); Text("Checking the cloud save…").font(.callout).foregroundStyle(.secondary) }
-                Button("Play Without It") { checking = false; go("offline") }.font(.callout)
+                HStack(spacing: 6) { ProgressView(); Text("Checking the Cloud Save…").font(.footnote).foregroundStyle(LauncherTheme.soft) }
+                Button("Play Without It") { checking = false; go("offline") }.font(.footnote).foregroundStyle(LauncherTheme.paleGold)
             }
+        } else {
+            Text("Play").font(.headline).foregroundStyle(LauncherTheme.paleGold).shadow(color: .black.opacity(0.6), radius: 6)
         }
     }
 
@@ -228,6 +275,23 @@ private struct LauncherView: View {
     }
 }
 
+// This phone's starting values and the settings it can't use (LauncherModel.deviceDefaults / unavailable), before the model reads them.
+// Under 10 GB of memory (the iPhone 16, 16 Pro and 17 have 8 GB) Cool mode starts on: Ocarina of Time's footprint reached about 5.9 GB on a 12 GB iPhone 18 Pro (log 23),
+// and Cool mode's smaller 3D views and in-between frames take less memory and GPU time. A phone without MetalFX's Metal 4 frame interpolator gets no frame generation
+// (the host's own check, nvn_mtl.m, leaves the game at 30 and records it for the next start; the launcher makes no Metal device, issue #840)
+private func deviceSetup() {
+    let gb = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+    if gb < 10 {
+        LauncherModel.deviceDefaults["DM_COOL"] = "1"
+        fputs(String(format: "launcher: this phone has %.1f GB of memory: Cool mode on by default\n", gb), stderr)
+    }
+    // what the game found the last time it started (nvn_mtl.m fg_on): making a Metal device here, before startGame applies DM_METAL_HUD, would keep the Performance HUD off
+    if UserDefaults.standard.bool(forKey: "dm.framegen.unsupported") {
+        LauncherModel.unavailable["DM_FRAMEGEN"] = "This iPhone can't make in-between frames: MetalFX frame interpolation needs a newer chip. The game shows its own 30 fps."
+        fputs("launcher: frame generation unavailable (the last start found no Metal 4 MetalFX frame interpolator)\n", stderr)
+    }
+}
+
 // Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher
 @_cdecl("dm_show_launcher")
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
@@ -235,6 +299,8 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
     let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
     guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
     guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
+    deviceSetup()
+    LauncherBackgroundStore.packedDir = dir
     let model = LauncherModel(file.settings)
     do {   // the screen's shape for the render scale's size in pixels with Wide view (LauncherSettings.swift rangeLabel), measured as front_ios.m does
         let sz = UIScreen.main.bounds.size, lo = min(sz.width, sz.height)

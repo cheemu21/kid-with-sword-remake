@@ -39,6 +39,11 @@ final class LauncherModel: ObservableObject {
     // The screen's width / height (the iOS launcher sets it from the app's window, as front_ios.m measures it for Wide view), for the render scale's size in pixels with
     // Wide view on; nil keeps 16:9 (the Mac)
     static var screenAspect: Double?
+    // This phone's own starting values, and the settings it can't use with why (the iOS launcher sets both before it makes the model, Launcher.swift deviceSetup; the Mac
+    // window leaves them empty). A starting value stands in for the game's default (base): Reset returns to it, and a choice equal to it is not stored. A setting the phone
+    // can't use starts off, whatever was saved, and its row is drawn disabled with the reason
+    static var deviceDefaults: [String: String] = [:]
+    static var unavailable: [String: String] = [:]
     let settings: [Setting]
     let fixed: Set<String>      // set by the launch environment: shown, not changed
     let fromLaunch: Set<String>   // the same set (a front end's launch overrides, Xcode; DM_ENV_LAUNCH_KEYS from launcher.c or main.m)
@@ -65,10 +70,13 @@ final class LauncherModel: ObservableObject {
             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
             let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
             values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? base(s)   // a saved choice the game no longer offers: the env file's value or the default
+            if LauncherModel.unavailable[s.env] != nil, s.kind == "toggle" { values[s.env] = s.offValue }
         }
     }
-    // A row's starting value: the env file's, when it set one the row takes, else the game's default
-    func base(_ s: Setting) -> String { fromFile[s.env].flatMap { s.accepts($0) ? $0 : nil } ?? s.def }
+    // A row's starting value: the env file's, when it set one the row takes, else this phone's own (deviceDefaults), else the game's default
+    func base(_ s: Setting) -> String {
+        fromFile[s.env].flatMap { s.accepts($0) ? $0 : nil } ?? LauncherModel.deviceDefaults[s.env].flatMap { s.accepts($0) ? $0 : nil } ?? s.def
+    }
     private func isBase(_ s: Setting, _ v: String) -> Bool {
         let b = base(s)
         return s.kind == "range" ? abs((Double(v) ?? .nan) - (Double(b) ?? .nan)) < 1e-6 : v == b   // a slider writes 1.00 for 1.0
@@ -97,7 +105,7 @@ final class LauncherModel: ObservableObject {
     func rangeLabel(_ s: Setting, _ chosen: Double) -> String {
         let cool = s.env == "DM_RENDER_SCALE" && values["DM_COOL"] == "1" && chosen > 0.5
         let v = cool ? 0.5 : chosen
-        var p = "\(Int((v * 100).rounded())) %" + (cool ? " · Cool mode" : "")
+        var p = "\(Int((v * 100).rounded())) %" + (cool ? " · Cool Mode" : "")
         if let name = s.marks?.first(where: { $0.count == 2 && abs((Double($0[0]) ?? -1) - v) < 0.001 })?[1] { p += " · \(name)" }
         guard let b = s.base else { return p }
         let handheld = (values["DM_OPMODE"] ?? "1") == "0", size = handheld ? b.handheld : b.docked

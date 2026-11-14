@@ -77,8 +77,17 @@ import Foundation
         mm.values["DM_OPMODE"] = "0"
         expect(mm.rangeLabel(macScale, 0.75) == "960 × 540 (75 %)", "handheld size in pixels")
         mm.values["DM_COOL"] = "1"
-        expect(mm.rangeLabel(macScale, 0.75) == "640 × 360 (50 % · Cool mode)", "Cool mode: the 50 % the game draws at")
+        expect(mm.rangeLabel(macScale, 0.75) == "640 × 360 (50 % · Cool Mode)", "Cool mode: the 50 % the game draws at")
         mm.values["DM_COOL"] = nil
+        // a phone's own starting value stands in for the game's default; a setting the phone can't use starts off, whatever was saved
+        let dd = UserDefaults(suiteName: "launcher.device.check")!; dd.removePersistentDomain(forName: "launcher.device.check")
+        LauncherModel.deviceDefaults["DM_RUMBLE"] = "0"
+        let dm = LauncherModel(mac.settings, defaults: dd)
+        expect(dm.values["DM_RUMBLE"] == "0" && !dm.changed, "the phone's starting value is the row's default, not a change")
+        LauncherModel.deviceDefaults = [:]
+        dd.set("1", forKey: "launcher.DM_RUMBLE"); LauncherModel.unavailable["DM_RUMBLE"] = "This phone can't."
+        expect(LauncherModel(mac.settings, defaults: dd).values["DM_RUMBLE"] == "0", "a setting the phone can't use starts off over a saved choice")
+        LauncherModel.unavailable = [:]; dd.removePersistentDomain(forName: "launcher.device.check")
         let plainScale = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_X","kind":"range","label":"X","note":"","default":"1.0","min":0.5,"max":1.0,"step":0.05,"level":"expert"}"#.utf8))
         expect(mm.rangeLabel(plainScale, 0.5) == "50 %" && !plainScale.basic, "no base size: the percentage; an unknown level decodes as Advanced")
         d.set("1", forKey: "launcher.DM_OPMODE"); setenv("DM_ENV_LAUNCH_KEYS", "DM_OPMODE", 1); setenv("DM_OPMODE", "0", 1)   // a front end's launch override over a saved choice

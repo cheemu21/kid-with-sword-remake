@@ -10,9 +10,10 @@ struct SettingRow: View {
     let s: Setting
     @ObservedObject var m: LauncherModel
 
-    private var locked: Bool { m.fixed.contains(s.env) }
+    private var locked: Bool { m.fixed.contains(s.env) || LauncherModel.unavailable[s.env] != nil }
     private var note: String {
-        guard locked else { return s.note }
+        if let why = LauncherModel.unavailable[s.env] { return why }
+        guard locked else { return LauncherModel.deviceDefaults[s.env] == nil ? s.note : (s.note.isEmpty ? "" : s.note + " · ") + "Recommended for this iPhone" }
         return (s.note.isEmpty ? "" : s.note + " · ") + (m.fromLaunch.contains(s.env) ? "Set at launch" : "Set by an env file")
     }
     private var rangeValue: Binding<Double> {

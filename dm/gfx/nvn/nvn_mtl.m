@@ -1431,7 +1431,13 @@ static void up_owner_check(const char *where) {
 // Old-queue command buffers (readback / diagnostics / present; to be deleted once M4-4 and M4-5 are migrated away): uploads are already on the Metal 4 queue, and there is no ordering guarantee between the two queues -
 // wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
 static void up_wait_zero(_Atomic int *v, int site);
-static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); rec_drain(); up_wait_zero(&g_up_pending, WS_OLDQ); } return [g_q commandBuffer]; }
+// Its errors are logged (the first 8): log 26 had four GPU resets in the pause menu that discarded the game's work, whose cause no logged command buffer reported
+static id<MTLCommandBuffer> q_cb(void) {
+    if (on_sub_thread()) { up_flush(); rec_drain(); up_wait_zero(&g_up_pending, WS_OLDQ); }
+    id<MTLCommandBuffer> cb = [g_q commandBuffer];
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { static _Atomic int n; if (c.error && atomic_fetch_add(&n, 1) < 8) MLOG("[RED] copy queue command buffer error: %s", c.error.description.UTF8String); }];
+    return cb;
+}
 static post_op *g_post; static int g_npost, g_postcap;
 // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
 // (command buffers, encoders, pass descriptors, etc.) are never released unless put in a pool. Measured on the character select screen of a real iOS device: the host heap grows by about 47 objects per frame, 0.22 MiB/s.
@@ -17104,7 +17110,11 @@ static int g_fg_mode = -1;
 static int fg_on(void) {
     if (g_fg_mode >= 0) return g_fg_mode;
     const char *e = getenv("DM_FRAMEGEN"); int v = e && atoi(e) > 0;
-    if (v && !(g_q4 && [MTLFXFrameInterpolatorDescriptor supportsMetal4FX:g_dev])) { MLOG("[RED] frame generation (DM_FRAMEGEN): this GPU has no Metal 4 MetalFX frame interpolator; frames are shown as the game draws them"); v = 0; }
+    int sup = g_q4 && [MTLFXFrameInterpolatorDescriptor supportsMetal4FX:g_dev];
+    // Kept for the iOS launcher's Frame Generation row at the next start (Launcher.swift deviceSetup): the launcher can't ask the GPU itself, as a Metal device made
+    // there comes before the Performance HUD's MTL_HUD_ENABLED and the HUD stays off (FF11; GitHub issue #840)
+    [[NSUserDefaults standardUserDefaults] setBool:!sup forKey:@"dm.framegen.unsupported"];
+    if (v && !sup) { MLOG("[RED] frame generation (DM_FRAMEGEN): this GPU has no Metal 4 MetalFX frame interpolator; frames are shown as the game draws them"); v = 0; }
     else if (v) MLOG("frame generation (DM_FRAMEGEN=1): MetalFX's frame interpolator makes a frame between each two presents, shown on the display link between them");
     return g_fg_mode = v;
 }
@@ -17450,6 +17460,28 @@ uint64_t mtl_snap_acquire_wait(void) {
 }
 // Copy the presented texture into the next ring slot; returns the slot's serial (0 = no snapshot: the game's texture is presented as before). period: the present's interval
 // (seconds), for frame generation, which follows the copy (fg_encode)
+// Frame generation pauses in the game's menus (DM_FRAMEGEN_MENU_PAUSE, default 1; 0 = never). Logs 24 and 26 (FF10, FF11 on an iPhone 18 Pro): the GPU hung seconds after
+// Ocarina of Time's pause menu opened, with frame generation on, and the process lost the GPU; with frame generation off the owner opened the menu many times without a hang.
+// The menu is told from what the game draws: about 180 draws a frame against 1,000-2,500 in the world (a Mac route's play never went under 1,100; the title, file select and
+// loading under 300). Below FG_MENU_DRAWS for FG_MENU_IN presents in a row the interpolation stops (each present shown on both ticks, as at 60 fps), and FG_MENU_OUT presents at
+// or above it start it again (its history restarts: generated frames show from the third, fg_encode). Only once the game has drawn FG_MENU_ARM presents at or above it (about
+// 30 s of play), so the title screen and the opening cutscene keep their generated frames (the owner's wish)
+enum { FG_MENU_DRAWS = 300, FG_MENU_IN = 6, FG_MENU_OUT = 2, FG_MENU_ARM = 900 };
+static int g_fg_paused; static uint64_t g_fg_pd_last, g_fg_pauses; static int g_fg_low, g_fg_high, g_fg_armed;
+static int fg_menu_pause(void) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_FRAMEGEN_MENU_PAUSE"); on = !e || atoi(e) != 0; MLOG("frame generation: %s (DM_FRAMEGEN_MENU_PAUSE)", on ? "pauses in the game's menus (under 300 draws a frame, after 30 s of play)" : "never pauses in menus"); }
+    uint64_t d = __atomic_load_n(&g_stat_draw, __ATOMIC_RELAXED), n = d - g_fg_pd_last; g_fg_pd_last = d;   // draws since the last present (the replay thread counts them)
+    if (!on) return 0;
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (n >= FG_MENU_DRAWS) {
+        g_fg_low = 0; if (g_fg_armed < FG_MENU_ARM && ++g_fg_armed == FG_MENU_ARM) MLOG("frame generation: menu pause armed at frame %llu (30 s of play)", (unsigned long long)f);
+        if (g_fg_paused && ++g_fg_high >= FG_MENU_OUT) { g_fg_paused = 0; g_fg_high = 0; if (g_fg_pauses <= 200) MLOG("frame generation: resumed at frame %llu (%llu draws a frame)", (unsigned long long)f, (unsigned long long)n); }
+    } else {
+        g_fg_high = 0;
+        if (!g_fg_paused && g_fg_armed >= FG_MENU_ARM && ++g_fg_low >= FG_MENU_IN) { g_fg_paused = 1; g_fg_low = 0; if (++g_fg_pauses <= 200) MLOG("frame generation: paused at frame %llu, a menu (%llu draws a frame); pause %llu", (unsigned long long)f, (unsigned long long)n, (unsigned long long)g_fg_pauses); }
+    }
+    return g_fg_paused;
+}
 static uint64_t snap_take(const tex_t *t, double period, const int crop[4], int *whole) {
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     pthread_mutex_lock(&g_pq_mu); int busy = atomic_load(&g_snap[k].ticket) > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
@@ -17513,8 +17545,9 @@ static uint64_t snap_take(const tex_t *t, double period, const int crop[4], int 
     if (fg_on()) {   // the frame between the previous present and this one (frame generation): only for presents held two ticks or more, as the display link shows it
         int pk = (int)((atomic_load(&g_snap_next) + (uint64_t)g_snap_n - 1) % (uint64_t)g_snap_n);
         g_snap[k].seq = g_fg_seq;
-        if (fg_mv_on()) fg_luma(cb, k);
-        if (period > 0.025) fg_encode(cb, k, pk, period); else g_fg_warm = 0;
+        int paused = fg_menu_pause();   // the game's menus: no interpolation, each present shown on both ticks, as at 60 fps below
+        if (!paused && fg_mv_on()) fg_luma(cb, k);
+        if (period > 0.025 && !paused) fg_encode(cb, k, pk, period); else g_fg_warm = 0;
     }
     [cb endCommandBuffer];
     MTL4CommitOptions *o = nil;
