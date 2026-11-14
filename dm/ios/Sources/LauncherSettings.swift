@@ -93,8 +93,11 @@ final class LauncherModel: ObservableObject {
     }
     func rows(in section: String, basic: Bool) -> [Setting] { rows(in: section).filter { $0.basic == basic } }
     // A range's label: its percentage, with the size in pixels for the chosen console mode when the list has the base size (the render scale)
-    func rangeLabel(_ s: Setting, _ v: Double) -> String {
-        var p = "\(Int((v * 100).rounded())) %"
+    // With Cool mode on the game draws at 50 % at most (loader.c dm_fps_state_apply), so the render scale's label shows that size
+    func rangeLabel(_ s: Setting, _ chosen: Double) -> String {
+        let cool = s.env == "DM_RENDER_SCALE" && values["DM_COOL"] == "1" && chosen > 0.5
+        let v = cool ? 0.5 : chosen
+        var p = "\(Int((v * 100).rounded())) %" + (cool ? " · Cool mode" : "")
         if let name = s.marks?.first(where: { $0.count == 2 && abs((Double($0[0]) ?? -1) - v) < 0.001 })?[1] { p += " · \(name)" }
         guard let b = s.base else { return p }
         let handheld = (values["DM_OPMODE"] ?? "1") == "0", size = handheld ? b.handheld : b.docked

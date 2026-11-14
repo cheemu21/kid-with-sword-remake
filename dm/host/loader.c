@@ -315,6 +315,14 @@ static void install_fps_state(module_t *m) {
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {
+    // Cool mode (DM_COOL=1, the launcher's Cool mode): less GPU work, so a phone keeps its clocks longer. The GPU heats an iPhone 18 Pro most at 30 fps with frame generation
+    // (log 23: the game's own frame 21-24 ms of each 33 ms, the interpolation 2-6 ms more; iOS cut the CPU clock 3.9 -> 1.6 GHz after 145 s). It sets the 3D views to 0.5
+    // (DM_RENDER_SCALE, unless it is already lower) and frame generation's frames to 0.5 of the size shown (DM_FRAMEGEN_SCALE, unless set; about half the pixels of the 1440x810 budget)
+    { const char *c = getenv("DM_COOL");
+      if (c && !strcmp(c, "1")) {
+          const char *r = getenv("DM_RENDER_SCALE"); if (!r || !(atof(r) > 0 && atof(r) <= 0.5)) setenv("DM_RENDER_SCALE", "0.5", 1);
+          if (!getenv("DM_FRAMEGEN_SCALE")) setenv("DM_FRAMEGEN_SCALE", "0.5", 1);
+          LOG("cool mode (DM_COOL=1): render scale %s, frame generation's frames at %s of the size shown", getenv("DM_RENDER_SCALE"), getenv("DM_FRAMEGEN_SCALE")); } }
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }

@@ -40,19 +40,19 @@ On iPhone, a game whose profile lists its amiibo (`amiibo.tsv`, for now The Lege
 
 - **Pick one from the list.** Nothing else is needed. None takes the amiibo away.
 - **Scan an amiibo**: hold a real figure flat against the top of the back of the phone, by the camera, until the sheet says it is ready. Then use amiibo in the game as usual (Ocarina of Time: Items, the amiibo icon, ZR). Only the figure's ID is read; nothing is written to it. The figure stays on the reader until you scan or pick another.
-- **A Shortcuts automation**, for installs that can't use the NFC reader (below).
+- **Tap a real amiibo**, in installs that can't use the NFC reader (LiveContainer, most free Apple ID installs), in place of Scan an amiibo: pick the figure there, and the game copies its ID and shows the steps for a Shortcuts automation with the exact folder to save into (below).
 
-### When Scan an amiibo says "Not available in this install"
+### When the menu shows Tap a real amiibo instead of Scan an amiibo
 
-iOS lets an app use the NFC reader only when the app is signed with the NFC tag reading permission (`com.apple.developer.nfc.readersession.formats` with `TAG`) and its Info.plist has an NFC usage text (`NFCReaderUsageDescription`, which the build adds). Without them the row says so and, when tapped, explains why instead of scanning (a scan without the usage text would close the game).
+iOS lets an app use the NFC reader only when the app is signed with the NFC tag reading permission (`com.apple.developer.nfc.readersession.formats` with `TAG`) and its Info.plist has an NFC usage text (`NFCReaderUsageDescription`, which the build adds). Without them the menu offers **Tap a real amiibo** (Shortcuts, below) instead of a scan, and its **Why not scan here?** row says which is missing (a scan without the usage text would close the game).
 
 - **Signed with a certificate service or a paid developer account:** most of these profiles include NFC. Check the profile: `security cms -D -i profile.mobileprovision | grep -A4 nfc` should list `TAG`. Sign with that entitlement in your entitlements file.
 - **Free Apple ID (SideStore, AltStore, Xcode with a personal team):** these may not include NFC. Use the list or Shortcuts.
-- **LiveContainer:** the game runs inside LiveContainer's app, so iOS checks **LiveContainer's** signature and Info.plist, not the game's. The scan works only when LiveContainer itself was signed with the NFC permission and has an `NFCReaderUsageDescription` in its Info.plist (add one, for example "Reads amiibo for games", before signing LiveContainer). Otherwise use the list or Shortcuts.
+- **LiveContainer:** the game runs inside LiveContainer's app, so iOS checks **LiveContainer's** signature and Info.plist, not the game's. LiveContainer's Info.plist has the usage text, but its entitlements do not ask for NFC tag reading, so the scan works only in a LiveContainer re-signed with that permission. Otherwise use the list or Shortcuts.
 
 ### Real figures without the NFC permission: Shortcuts
 
-The Shortcuts app can react to an NFC tag by itself, so a tap of a figure can load it into the game in any install, LiveContainer included. Set it up once for each figure:
+The Shortcuts app can react to an NFC tag by itself, so a tap of a figure can load it into the game in any install, LiveContainer included. Set it up once for each figure. In the game, Amiibo › **Tap a real amiibo** › the figure copies its ID and shows these steps with the folder for step 5 already filled in:
 
 1. Find the figure's ID: the first column of the game's `amiibo.tsv` (in this repository: `dm/games/<title ID>/amiibo.tsv`), or any amiibo list (16 hex digits).
 2. Shortcuts → **Automation** → **+** → **NFC** → **Scan**, hold the figure to the phone and give it a name (for example "Link"). Choose **Run Immediately**.

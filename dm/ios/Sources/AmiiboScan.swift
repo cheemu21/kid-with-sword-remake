@@ -39,12 +39,56 @@ final class AmiiboScan: NSObject, NFCTagReaderSessionDelegate {
         return nil
     }()
 
-    // The Amiibo menu's row (GameMenu.swift): a scan, or the reason there is none
-    static func menuItem(path: String, names: [String: String]) -> UIAction {
-        let reason = unavailableReason
-        return UIAction(title: "Scan an amiibo", subtitle: reason == nil ? "Hold a real amiibo to the phone" : "Not available in this install", image: UIImage(systemName: "wave.3.right")) { _ in
-            if let r = reason { tell(notCompatible, r.prefix(1).uppercased() + r.dropFirst() + ".\n\n" + otherWays) } else { start(path: path, names: names) }
+    // The Amiibo menu's row (GameMenu.swift): a scan, or, in an install that can't use the reader (LiveContainer), the Shortcuts helper (shortcutsMenu)
+    static func menuItem(path: String, rows: [[String]]) -> UIMenuElement {
+        guard unavailableReason == nil else { return shortcutsMenu(path: path, rows: rows) }
+        var names: [String: String] = [:]; for r in rows { names[r[0].lowercased()] = r[1] }
+        return UIAction(title: "Scan an amiibo", subtitle: "Hold a real amiibo to the phone", image: UIImage(systemName: "wave.3.right")) { _ in start(path: path, names: names) }
+    }
+
+    // Real figures without the reader: the Shortcuts app's NFC automations run in any install, LiveContainer included, but it can't read an amiibo's ID, so each figure gets
+    // an automation that saves that figure's ID into the file DM_AMIIBO names (docs/playing.md, Shortcuts). Picking a figure here copies its ID and shows the steps with the
+    // folder to save into as the Files app shows it: under LiveContainer the game's Documents sits in LiveContainer's at Data/Application/<the game's container ID>/Documents
+    static func shortcutsMenu(path: String, rows: [[String]]) -> UIMenu {
+        var groups: [String: [UIMenuElement]] = [:], order: [String] = []
+        for r in rows {
+            let g = r.count > 2 ? r[2] : ""
+            if groups[g] == nil { groups[g] = []; order.append(g) }
+            groups[g]!.append(UIAction(title: r[1]) { _ in shortcutSteps(id: r[0], name: r[1], file: path) })
         }
+        let why = UIAction(title: "Why not scan here?", image: UIImage(systemName: "info.circle")) { _ in
+            let r = unavailableReason ?? ""
+            tell(notCompatible, r.prefix(1).uppercased() + r.dropFirst() + ".\n\nThe Shortcuts app can still react to a figure: pick it in this list for the steps.")
+        }
+        let kids: [UIMenuElement] = order.map { UIMenu(title: $0, options: $0.isEmpty ? .displayInline : [], children: groups[$0]!) } + [UIMenu(options: .displayInline, children: [why])]
+        return UIMenu(title: "Tap a real amiibo", subtitle: "Set up with Shortcuts, once per figure", image: UIImage(systemName: "wave.3.right"), children: kids)
+    }
+
+    // The folder that holds `file`, as the Files app shows it: "On My iPhone › <the running app's name>" and the path below the app's own Documents
+    static func filesFolder(_ file: String) -> String {
+        let parts = (file as NSString).deletingLastPathComponent.split(separator: "/").map(String.init)
+        var below: [String] = []
+        if let i = parts.firstIndex(of: "Application"), i + 2 < parts.count, parts[i + 2] == "Documents" { below = Array(parts[(i + 3)...]) }   // …/Data/Application/<id>/Documents/…
+        var app = "the app"
+        if let image = _dyld_get_image_name(0), let info = NSDictionary(contentsOf: URL(fileURLWithPath: String(cString: image)).deletingLastPathComponent().appendingPathComponent("Info.plist")) {
+            app = (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String) ?? app
+        }
+        return (["On My iPhone", app] + below).joined(separator: " › ")
+    }
+
+    static func shortcutSteps(id: String, name: String, file: String) {
+        UIPasteboard.general.string = id
+        tell("\(name): tap to load", """
+        Its ID \(id) is copied. Set it up once in the Shortcuts app:
+
+        1. Automation › + › NFC › Scan, hold \(name) to the top of the phone's back, name it, then Run Immediately.
+        2. New Blank Automation › add Text and paste the ID.
+        3. Add Set Name: amiibo.txt
+        4. Add Save File: Ask Where to Save off, Overwrite If File Exists on, and this folder:
+        \(filesFolder(file))
+
+        After that, tap \(name) to the phone before you use amiibo in the game.
+        """)
     }
 
     static func start(path: String, names: [String: String]) {

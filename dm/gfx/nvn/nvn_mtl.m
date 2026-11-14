@@ -10254,7 +10254,8 @@ static uint64_t g_stat_pool_why[5];   // why a table was built whole: no table o
 // [2] resized, [3] a change without a note, [4] a new submission over more than POOL_IDS_MAX retired IDs. pchg / schg: of those patched or kept, the ones over memory pool changes
 // and over a new submission
 static uint64_t g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_nopatch[5], g_stat_pool_pchg, g_stat_pool_schg;
-void mtl_pool_stats(uint64_t s[6]) { s[0] = g_stat_pool_builds; s[1] = (uint64_t)(g_stat_pool_ms * 1000); s[2] = g_stat_pool_patched; s[3] = g_stat_pool_kept; s[4] = g_stat_pool_pchg; s[5] = g_stat_pool_schg; }   // the power line's pool table counts (hle_nvn.c)
+static uint64_t g_pool_made, g_pool_reused;
+void mtl_pool_stats(uint64_t s[8]) { s[0] = g_stat_pool_builds; s[1] = (uint64_t)(g_stat_pool_ms * 1000); s[2] = g_stat_pool_patched; s[3] = g_stat_pool_kept; s[4] = g_stat_pool_pchg; s[5] = g_stat_pool_schg; s[6] = g_pool_made; s[7] = g_pool_reused; }   // the power line's pool table counts (hle_nvn.c)
 static void ids_push(pool_ids *l, int id_) {   // past POOL_IDS_MAX the list is dropped (n -1)
     if (l->n < 0) return;
     if (l->n == POOL_IDS_MAX) { free(l->v); *l = (pool_ids){NULL, -1, 0}; return; }
@@ -10519,8 +10520,11 @@ static void pool_seen_scan(void) {
 }
 // A table replaced by a new walk is reused once the submission that may read it has completed, the last segment's fence covering every segment before it: a new buffer each time meant an allocation, a residency add and remove, and a kernel call or more each way,
 // about 3 a frame in Ocarina of Time. Sizes round up to 64 KB, as a pool grows by a few IDs at a time. What cannot be used again soon leaves when the spares are full (the idea is from PR 1428)
-enum { POOL_SPARES = 16 };
-static struct { __strong id<MTLBuffer> buf; uint64_t fence; } g_pool_spare[POOL_SPARES]; static int g_npool_spare; static uint64_t g_pool_made, g_pool_reused;
+// Ocarina of Time patches about 16 tables a frame (pool_gpu), and a table given back is free only once the GPU has run the submission that may read it, two or three frames on: with 16
+// spares nearly every patch made a new buffer, and each new buffer and each one let go was a residency commit (a kernel call): about 8 % of the replay thread's time on an M5 at 30 fps
+// (buffer creation 2 %, residency commits 7 %; a 15 s sample of a Kokiri Forest walk). 64 spares hold four frames of them, about 21 MB of Ocarina of Time's 320 KB tables
+enum { POOL_SPARES = 64 };
+static struct { __strong id<MTLBuffer> buf; uint64_t fence; } g_pool_spare[POOL_SPARES]; static int g_npool_spare;
 static id<MTLBuffer> pool_table_take(size_t need) {
     size_t len = (need + 0xffff) & ~(size_t)0xffff; uint64_t done = g_done;
     for (int i = 0; i < g_npool_spare; i++) if (g_pool_spare[i].fence <= done && g_pool_spare[i].buf.length == len) {
@@ -16752,7 +16756,7 @@ static const char *const g_fg_budget_name[FG_LEVELS] = {"1440x810", "1200x675", 
 static _Atomic int g_fg_level;   // the budget's step: changed on the display link thread under g_pq_mu, read where the snapshots are sized (fg_shown_size)
 static _Atomic uint64_t g_fg_shown_px;   // the pixels of the last picture sized for frame generation as shown (fg_shown_size), for fg_level_down
 static uint64_t g_fg_lvl_calm, g_fg_up_at, g_fg_lvl_downs, g_fg_lvl_ups; static int g_fg_up_need = FG_UP_CALM;
-static int fg_level_down(void);
+static int fg_level_down(void); static _Atomic uint64_t g_fg_gpu_avg_us;
 
 // A display link callback whose present took 50 ms or more (three ticks): where the time went, so a silent link (the rescue below) can be traced to its wait.
 // what: the picture shown; snap: the wait for the encode thread to commit its snapshot; present: present_now, alloc of it waiting for a present allocator, res for the residency commit
@@ -16848,7 +16852,10 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
         int behind = ticket > first, late = g_fg_starved, drop = behind || late; g_fg_starved = 0;
         if (drop) { int again = g_fg_last_drop && ticket - g_fg_last_drop <= FG_AGAIN; g_fg_last_drop = ticket; g_fg_lvl_calm = 0; g_fg_drops++;
             if (again && fg_on()) {
-                if (fg_level_down()) {   // lighter (FG_LEVELS)
+                int st = fg_level_down();
+                if (st < 0) { static uint64_t n; if (!(n++ % 100)) MLOG("frame generation: frames keep dropping, but the interpolation takes only %.1f ms: the game's frames are late, not its; its frames keep the %s pixel budget (%llu drops so far)",
+                                                                     atomic_load(&g_fg_gpu_avg_us) / 1000.0, g_fg_budget_name[atomic_load(&g_fg_level)], (unsigned long long)g_fg_drops); }
+                else if (st > 0) {   // lighter (FG_LEVELS)
                     if (g_fg_up_at && ticket - g_fg_up_at <= FG_UP_BACK) g_fg_up_need = MIN(g_fg_up_need * 2, FG_UP_CALM_MAX);
                     g_fg_lvl_downs++; g_fg_last_drop = 0;   // the next drop counts as a lone one: the lighter frames get their chance
                     MLOG("frame generation: frames keep dropping, its frames are made lighter: the %s pixel budget (step %d of %d; #%llu)", g_fg_budget_name[atomic_load(&g_fg_level)],
@@ -17110,8 +17117,11 @@ static int fg_mv_on(void) {
     if (e && atoi(e) <= 0) { MLOG("frame generation: no motion given to the interpolator (DM_FRAMEGEN_MV=0): its own flow finds it, up to about 64 px a frame"); return g_fgmv_ok = 0; }
     NSError *err = nil; id<MTLLibrary> lib = host_lib("fgmv", &err);
     static const char *fn[8] = {"fgmv_luma", "fgmv_search", "fgmv_pick", "fgmv_still", "fgmv_hud", "fgmv_keep", "fgmv_pstill", "fgmv_conf"};
+    // DM_FRAMEGEN_PASTE=1: blocks whose motion is not trusted take the present's own pixels whole (fgmv.metal FGMV_PASTE: off by default, squares that stepped at 30 fps on camera turns)
+    const char *pe = getenv("DM_FRAMEGEN_PASTE"); bool paste = pe && atoi(pe) > 0;
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; [cv setConstantValue:&paste type:MTLDataTypeBool atIndex:0];
     for (int i = 0; i < 8; i++) {
-        id<MTLFunction> f = lib ? [lib newFunctionWithName:@(fn[i])] : nil;
+        id<MTLFunction> f = !lib ? nil : i == FGMV_HUD ? [lib newFunctionWithName:@(fn[i]) constantValues:cv error:&err] : [lib newFunctionWithName:@(fn[i])];
         g_fgmv_ps[i] = f ? [g_dev newComputePipelineStateWithFunction:f error:&err] : nil;
         if (!g_fgmv_ps[i]) { MLOG("[RED] frame generation: no %s pipeline (%s): the interpolator gets no motion, as X6-X9", fn[i], err.description.UTF8String); return g_fgmv_ok = 0; }
     }
@@ -17119,7 +17129,8 @@ static int fg_mv_on(void) {
     MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 5;   // fgmv_keep reads the motion at 4
     g_fgmv_args = [g_dev newArgumentTableWithDescriptor:ad error:&err];
     if (!g_fgmv_args) { MLOG("[RED] frame generation: no argument table for the motion (%s): no motion given", err.description.UTF8String); return g_fgmv_ok = 0; }
-    MLOG("frame generation: motion found from the presented pictures (DM_FRAMEGEN_MV=1: 64 px tiles searched within 192 px at 1/8 size), the still HUD kept from the present");
+    MLOG("frame generation: motion found from the presented pictures (DM_FRAMEGEN_MV=1: 64 px tiles searched within 192 px at 1/8 size, refined to 2 px), the still HUD kept from the present%s",
+         paste ? "; blocks whose motion is not trusted pasted from it (DM_FRAMEGEN_PASTE=1)" : "");
     return g_fgmv_ok = 1;
 }
 // The formats fg_keep may write the generated frame in (shader writes; not the sRGB ones)
@@ -17145,6 +17156,7 @@ static id<MTL4FXFrameInterpolator> g_fg_fi; static id<MTL4Compiler> g_fg_comp;
 static id<MTL4CounterHeap> g_fg_heap;   // per ring slot, timestamps before and after its interpolation (fg_encode, read by the snapshot's commit feedback)
 static id<MTLBuffer> g_fg_tsbuf;   // 8 bytes the encoders holding those timestamps copy 4 of: a timestamp in an encoder without work reads 0
 static double g_fg_gpu_last;   // the last interpolation's GPU time in seconds (tests)
+static _Atomic uint64_t g_fg_gpu_avg_us;   // its moving average (1/16 a sample) in µs: whether the interpolation's own cost is heavy enough for dropping frames to make it lighter (fg_level_down)
 static NSUInteger g_fg_key[3]; static int g_fg_bad;   // the interpolator's colour format, width and height; g_fg_bad: MetalFX made none for them
 static id<MTLTexture> g_fg_depth, g_fg_motion; static int g_fg_clear;   // the depth (constant: far) and motion inputs, cleared by the first command buffer after they are made;
 // the motion is fg_motion's from X10 on (at 1/8 size), else constant (none, at half size)
@@ -17233,8 +17245,14 @@ static double fg_size_for(double w, double h) {   // the factor for a picture sh
 }
 // Frames keep dropping (the display link, under g_pq_mu): the next step of the budget, when it makes the last picture's frames smaller; 0 when there is none (the
 // interpolation then stays at its lightest and keeps running). The step is made from the next snapshot on (a new size starts the interpolation's history again: one present without a generated frame)
+// Only while the interpolation's own GPU time is heavy (its average at least DM_FRAMEGEN_HEAVY_MS, default 8): −1 otherwise, and its frames keep their size. Dropped frames alone
+// did not say the interpolation was their cause: on a hot iPhone 18 Pro at 30 fps (FF7, log 22, thermal 1 from 17 s) the game's own frame ran late (submit 20-23 ms of wall clock,
+// p95 35-38 ms against 33.3, CPU at 1.7-2.5 GHz) while the interpolation took 1.5-5.3 ms; the budget stepped down to 960x540 within 10 s and stayed there, its frames generated at
+// half the size shown (a blurred, unsteady in-between picture), and frames dropped as often after as before (37, 46, 38 in 300). FF2's case is still met: 5-10 ms a frame, p95 16
+static double fg_heavy_ms(void) { static double v = -1; if (v < 0) { const char *e = getenv("DM_FRAMEGEN_HEAVY_MS"); v = e && *e ? atof(e) : 8; if (e && *e) MLOG("frame generation: made lighter only while the interpolation takes %.1f ms or more (DM_FRAMEGEN_HEAVY_MS)", v); } return v; }
 static int fg_level_down(void) {
     int l = atomic_load(&g_fg_level); double px = (double)atomic_load(&g_fg_shown_px);
+    if (!fg_fixed() && atomic_load(&g_fg_gpu_avg_us) < fg_heavy_ms() * 1000) return -1;
     if (fg_fixed() || l + 1 >= FG_LEVELS || !px || !(fg_size_at(px, l + 1) < fg_size_at(px, l))) return 0;
     atomic_store(&g_fg_level, l + 1); return 1;
 }
@@ -17295,6 +17313,7 @@ static int fg_scale(id<MTL4CommandBuffer> cb, int k, id<MTLTexture> src, id<MTLT
 // device it runs on (log.txt on an iPhone)
 static void fg_gpu_note(double s) {
     g_fg_gpu_last = s;
+    if (s > 0 && s < 1) { uint64_t a = atomic_load(&g_fg_gpu_avg_us), us = (uint64_t)(s * 1e6); atomic_store(&g_fg_gpu_avg_us, a ? (a * 15 + us) / 16 : us); }
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static double v[600]; static int n;
     if (!(s > 0 && s < 1)) return;
     pthread_mutex_lock(&mu);

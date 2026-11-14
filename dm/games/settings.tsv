@@ -18,6 +18,7 @@ DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platfo
 DM_FRAMEGEN	toggle	-	0	gfxapi:nvn	Game	Frame generation	Shows 60 frames a second while the game draws 30: MetalFX makes a frame between each two. Less work and heat than 60 fps, with more input delay than real 60; fast motion can smear.	needs=DM_FPS_TARGET=30
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
 DM_RENDER_SCALE	range	0.5:1.0:0.05	0.6|1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+DM_COOL	toggle	-	0	gfxapi:nvn	Game	Cool mode	Less heat, so the phone keeps its speed longer: the 3D picture at 50 % whatever Render scale says, and frame generation's in-between frames at half size. A softer picture.
 DM_WIDE_VIEW	toggle	-	1	fixups:WIDE_VIEW	Game	Wide view	Fills the whole iPhone screen at its own shape (about 19.5:9) with a wider view and no black bars; the 3D cameras and the HUD follow the screen's shape, so nothing stretches. Renders about a fifth more pixels: a little slower and warmer. Takes effect the next time the game starts. On by default on an iPhone; an iPad keeps 16:9.
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.

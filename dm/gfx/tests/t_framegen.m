@@ -264,7 +264,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     // a step up doubles how long that takes
     {   uint64_t big = 1920 * 1080; int up0 = g_fg_up_need;
         atomic_store(&g_fg_level, 0); g_fg_lvl_calm = 0; g_fg_up_at = 0;
-        #define LATE2(i0, px) for (int i = 0; i < 2; i++) { tick(); tex_t t = frame((i0) + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); atomic_store(&g_fg_shown_px, (px)); tick(); tick(); }
+        #define LATE2(i0, px) for (int i = 0; i < 2; i++) { atomic_store(&g_fg_gpu_avg_us, heavy); tick(); tex_t t = frame((i0) + i); present_enqueue(&t, 1 / 30.0, NULL, 0, NULL); copied(); atomic_store(&g_fg_shown_px, (px)); atomic_store(&g_fg_gpu_avg_us, heavy); tick(); tick(); }
+        // The interpolation light (its average GPU time under DM_FRAMEGEN_HEAVY_MS, 8 ms): the game's frames are late, not its; dropping frames leave its size (log 22)
+        uint64_t heavy = 3000; calm(); steady(66, 2); LATE2(68, big); LATE2(70, big);
+        CHECK("frames dropping while the interpolation is light: its frames keep their size", atomic_load(&g_fg_level) == 0);
+        heavy = 12000;   // heavy (12 ms a generated frame): the steps below
         calm(); steady(70, 4); LATE2(74, big);
         int l1 = atomic_load(&g_fg_level);
         LATE2(76, big); int l2 = atomic_load(&g_fg_level);

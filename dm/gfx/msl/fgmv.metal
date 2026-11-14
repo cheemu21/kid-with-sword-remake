@@ -14,6 +14,9 @@ using namespace metal;
 #define FGMV_P (FGMV_T + 2 * FGMV_R)   // the previous picture's window a tile searches
 #define FGMV_N ((2 * FGMV_R + 1) * (2 * FGMV_R + 1))
 #define FGMV_TG 256
+#ifndef FGMV_REFINE
+#define FGMV_REFINE 1   // fgmv_pick refines the vector it picked (half then quarter 1/8 pixel steps)
+#endif
 
 kernel void fgmv_luma(texture2d<float, access::read> src [[texture(0)]], texture2d<half, access::write> dst [[texture(1)]], uint2 g [[thread_position_in_grid]]) {
     if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
@@ -100,6 +103,17 @@ kernel void fgmv_pick(texture2d<half, access::read> cur [[texture(0)]], texture2
         float2 v = float2(tv.xy); float cst = fgmv_cost(cur, prev, gi, v, inv, mx) - (x == 0 && y == 0 ? 0.001f : 0);
         if (cst < bc) { bc = cst; bv = v; }
     }
+    // Refined around the vector picked, in half then quarter steps of a 1/8 pixel (4 then 2 px of the picture): a tile's one vector is off within its 64x64 px wherever the
+    // motion varies across it (a camera turn moves near ground faster than far), and what it left unexplained was pasted from the present or smeared (FGMV_REFINE)
+    if (FGMV_REFINE && any(bv != 0))
+        for (float st = 0.5f; st > 0.2f; st *= 0.5f) {
+            float2 c = bv;
+            for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+                if (!x && !y) continue;
+                float2 v = c + float2(x, y) * st; float cst = fgmv_cost(cur, prev, gi, v, inv, mx);
+                if (cst < bc) { bc = cst; bv = v; }
+            }
+        }
     mot.write(half4(half(bv.x), half(bv.y), 0, 0), g);
 }
 
@@ -152,6 +166,12 @@ kernel void fgmv_conf(texture2d<half, access::read> cur [[texture(0)]], texture2
     }
     conf.write(half4(half(r)), g);
 }
+// FGMV_PASTE (DM_FRAMEGEN_PASTE=1; off by default): a block whose motion is not trusted and not shared takes the present's own pixels over the 24x24 around it. Off, the
+// interpolator's frame stays there. t_framegen stab with the refined motion (fgmv_pick), pans of 24 and 96 px a frame, plain and as on a camera turn: pasted, 7-13 % of the
+// scene was held at 30 fps (squares of the present's picture that stepped at 30 while the rest moved at 60: most on scenery panning correctly, the motion's mismatch alone)
+// and the scene error was 0.0058-0.0237; not pasted, 0.1-0.7 % held and 0.0023-0.0187 (the picture's own error halved on a slow pan), the moving object's error
+// 0.063-0.113 against 0.093-0.131, at the cost of more smear right around that object (0.045-0.077 against 0.028-0.059 of what none of the three pictures has)
+constant bool FGMV_PASTE [[function_constant(0)]];
 kernel void fgmv_hud(texture2d<half, access::read> st [[texture(0)]], texture2d<half, access::write> keep [[texture(1)]], texture2d<half, access::read> conf [[texture(2)]],
                      uint2 g [[thread_position_in_grid]]) {
     if (g.x >= keep.get_width() || g.y >= keep.get_height()) return;
@@ -163,7 +183,7 @@ kernel void fgmv_hud(texture2d<half, access::read> st [[texture(0)]], texture2d<
     // 1/8 pixel alone: the present's own moved half its step (0.5, fgmv_keep), where X13's unmoved squares were the patches of texture on a camera turn
     if (conf.get_width() > 1) {
         int2 cm = int2(conf.get_width() - 1, conf.get_height() - 1), c = gi / 2;
-        for (int y = -1; y <= 1 && k < 1.0h; y++) for (int x = -1; x <= 1; x++) if (float(conf.read(uint2(clamp(c + int2(x, y), int2(0), cm))).r) > FGMV_BAD) { k = 1; break; }
+        if (FGMV_PASTE) for (int y = -1; y <= 1 && k < 1.0h; y++) for (int x = -1; x <= 1; x++) if (float(conf.read(uint2(clamp(c + int2(x, y), int2(0), cm))).r) > FGMV_BAD) { k = 1; break; }
         if (k < 1.0h && float(conf.read(uint2(clamp(c, int2(0), cm))).r) < -FGMV_BAD) k = 0.5h;
     }
     if (k < 1.0h && st.read(g).r > 0.5h)
