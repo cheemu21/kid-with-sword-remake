@@ -2629,14 +2629,33 @@ def mac_host(py, repo, work, env, logs, g):
     PROG.stage('Mac host', step='building')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
     PROG.set(step='button-icon font')
-    font = work / 'font'; ttf, kf = font / 'nintendo_ext.ttf', font / 'nintendo_ext.key'
+    font = work / 'font'; kf = font / 'nintendo_ext.key'
+    variants = (('switch', font / 'nintendo_ext.ttf'), ('xbox', font / 'nintendo_ext_xbox.ttf'), ('playstation', font / 'nintendo_ext_playstation.ttf'))
     key = fingerprint(('files', [repo / 'dm/tools/make_ext_font.py']))
-    if not (ttf.is_file() and reused(kf, key) is not None):
+    if not (all(p.is_file() for _, p in variants) and reused(kf, key) is not None):
         rmtree(kf); font.mkdir(parents=True, exist_ok=True)
-        run([py, repo / 'dm/tools/make_ext_font.py', ttf], logs / 'make_ext_font.log', env=env)
+        for layout, ttf in variants:
+            run([py, repo / 'dm/tools/make_ext_font.py', '--layout', layout, ttf], logs / 'make_ext_font.log', env=env)
         kf.write_text(f'{key}\n')
     PROG.end(str(host))
     return host, font
+
+
+def mac_pad_overlays(py, repo, work, game, env, logs, g):
+    """Build PlayStation/Xbox RomFS overlays (scripts/oot_pad_overlay.py) into <id>_build/overlay_{playstation,xbox} when the game profile supplies controller diagrams."""
+    ps_png, xb_png = g.dir / 'controller_dualsense.png', g.dir / 'controller_xbox.png'
+    gen = repo / 'scripts/oot_pad_overlay.py'
+    if not (ps_png.is_file() and xb_png.is_file() and gen.is_file()): return ()
+    rom_src = rfs.source(game)
+    kf = work / 'pad_overlay.key'
+    ovs = (work / 'overlay_playstation', work / 'overlay_xbox')
+    key = fingerprint(('files', [gen, repo / 'dm/tools/oot_pad_overlay.m', ps_png, xb_png]), ('tree', rom_src))
+    if not (all(d.is_dir() for d in ovs) and reused(kf, key) is not None):
+        rmtree(kf)
+        for d in ovs: rmtree(d)
+        run([py, gen, rom_src, work, '--cache-dir', work / 'tools'], logs / 'pad_overlay.log', env=env)
+        kf.write_text(f'{key}\n')
+    return ovs
 
 
 def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file='', partial=False, parts=None, jit=False):
@@ -2772,6 +2791,8 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
                    ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
         if v: cmd += [opt, v]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
+    for ov in (work / 'overlay_playstation', work / 'overlay_xbox'):
+        if ov.is_dir(): cmd += ['--overlay', ov]
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
     unchanged = False
     def line(ln):
@@ -3186,6 +3207,7 @@ def main(args=None):
         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
             rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}
         host, font = mac_host(py, repo, work, env, logs, g)
+        mac_pad_overlays(py, repo, work, game, env, logs, g)
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
@@ -3199,6 +3221,7 @@ def main(args=None):
     if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
         first = getattr(args, 'in_programs', None)   # a program packed with the application's first: its host, built over all of them, and its fonts
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
+        mac_pad_overlays(py, repo, work, game, env, logs, g)
         parts = {'font': font}
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
         rmtree(work / 'tmp')

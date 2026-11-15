@@ -1,10 +1,14 @@
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
 #include "front.h"
+#include "dm_input.h"
 #include "../gfx/nvn/dmsh_chain.h"
 #include <CoreFoundation/CoreFoundation.h>
+#include <limits.h>
 #include <stdatomic.h>
+#include <strings.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -98,9 +102,50 @@ static int profile_modules(const char *dir, const char **names) {
 static pthread_key_t g_race_keys[512];
 static unsigned g_race_n, g_race_want;
 static void *keyrace_thread(void *unused);
+// Append dir to a colon-separated overlay list if it is an existing directory and not already listed.
+static void pad_overlay_add(char *ov, size_t cap, const char *dir) {
+    struct stat st;
+    if (!dir || !*dir || stat(dir, &st) || !S_ISDIR(st.st_mode)) return;
+    size_t dlen = strlen(dir);
+    for (const char *p = ov; p && *p;) {
+        const char *c = strchr(p, ':');
+        size_t len = c ? (size_t)(c - p) : strlen(p);
+        if (len == dlen && !strncmp(p, dir, len)) return;
+        p = c ? c + 1 : NULL;
+    }
+    size_t cur = strlen(ov);
+    snprintf(ov + cur, cap > cur ? cap - cur : 0, "%s%s", cur ? ":" : "", dir);
+}
+
+static int g_pad_font_auto;
+
+// Controller layout (DM_PAD_LAYOUT=xbox|playstation): pick matching shared-font button glyphs ($DM_FONT_DIR/nintendo_ext_<layout>.ttf) and stack
+// per-game ($DM_ROOT/overlay_<layout>) and bundled (<res>/dm/overlay_<layout>) RomFS icon overlays behind any existing DM_ROMFS_OVERLAY.
+static void pad_layout_env(void) {
+    int layout = dm_pad_face_layout();
+    if (layout == DM_PAD_LAYOUT_SWITCH) return;
+    const char *lname = layout == DM_PAD_LAYOUT_PLAYSTATION ? "playstation" : "xbox";
+    const char *fd = getenv("DM_FONT_DIR"), *root = getenv("DM_ROOT");
+    char p[PATH_MAX], ov[2048]; struct stat st;
+    if (fd && *fd && (!getenv("DM_SHARED_FONT_EXT") || g_pad_font_auto)) {
+        snprintf(p, sizeof p, "%s/nintendo_ext_%s.ttf", fd, lname);
+        if (!stat(p, &st) && S_ISREG(st.st_mode)) { setenv("DM_SHARED_FONT_EXT", p, 1); g_pad_font_auto = 1; }
+    }
+    const char *cur = getenv("DM_ROMFS_OVERLAY");
+    snprintf(ov, sizeof ov, "%s", cur ? cur : "");
+    if (root && *root) { snprintf(p, sizeof p, "%s/overlay_%s", root, lname); pad_overlay_add(ov, sizeof ov, p); }
+    if (fd && *fd) {
+        char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", fd);
+        char *s = strrchr(dir, '/');
+        if (s) { *s = 0; snprintf(p, sizeof p, "%s/overlay_%s", dir, lname); pad_overlay_add(ov, sizeof ov, p); }
+    }
+    if (ov[0] && (!cur || strcmp(ov, cur))) setenv("DM_ROMFS_OVERLAY", ov, 1);
+}
+
 static void host_preload(int argc, char **argv) {
     g_t0_ns = proc_start_mono_ns();
     flags_init();
+    pad_layout_env();
     if (argc < 2) die("usage: dmhost <dir> [mod...] [-- game arguments...]");
     // Time zone: the game converts absolute time to local time along two paths, both ending in the host libc -- nn::time::ToCalendarTime (hle_time.c, localtime_r) and the guest libc's
     // localtime_r / mktime (hle_table.c wires them straight to the host). So only when the host follows the system time zone do the original game's screens (chronicle discovery time etc.) show this machine's time.
@@ -176,6 +221,7 @@ int main(int argc, char **argv) {
         void crash_thread_init(void); crash_thread_init();   // The signal alternate stack is per thread: loading installed it on another thread, so add it for this thread
         LOG("host loading already finished early in the background (dm_host_preload_start)");
     } else host_preload(argc, argv);
+    pad_layout_env();
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
     front_run(guest_main);
     return 0;

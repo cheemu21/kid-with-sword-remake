@@ -1,7 +1,8 @@
 // Raw HID gamepads that GameController does not list (an 8BitDo in its own mode: a Bluetooth HID gamepad macOS pairs, GitHub issue #637): one device's buttons, hat and axes
 // as HID reports them, turned into Switch buttons and sticks. Pure, so tests/t_pad_hid.c checks it without a controller; pad_hid_mac.h reads the devices.
-// Buttons by position, as front_mac.m maps GameController (right A, bottom B, top X, left Y). The default map is 8BitDo's D-input numbering (HID button usages 1 A, 2 B, 4 X,
-// 5 Y, 7 / 8 LB / RB, 9 / 10 LT / RT, 11 select, 12 start, 14 / 15 stick clicks, by Xbox labels); DM_HID_MAP=A=2,B=1,… replaces entries, DM_HID_LOG=1 logs each usage pressed.
+// Buttons by position, as front_mac.m maps GameController (right A, bottom B, top X, left Y), or by their printed labels with DM_PAD_LAYOUT=xbox / playstation. The default map
+// is 8BitDo's D-input numbering (HID button usages 1 A, 2 B, 4 X, 5 Y, 7 / 8 LB / RB, 9 / 10 LT / RT, 11 select, 12 start, 14 / 15 stick clicks, by Xbox labels);
+// DM_HID_MAP=A=2,B=1,… replaces entries, DM_HID_LOG=1 logs each usage pressed.
 // Sticks: X / Y left, Z / Rz right (Rx / Ry on a device without Z); analog triggers (Brake / Accelerator) press ZL / ZR past half.
 #pragma once
 #include <math.h>
@@ -21,8 +22,6 @@ typedef struct {
     uint8_t map[16];           // Switch button bit (dm_input.h order) -> HID button usage, 0 none
 } pad_hid;
 
-static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
-
 // Identical pads (front_mac.m, DM_PAD_IDENTICAL): whether every pad of one model is read as a player of its own, instead of through GameController.
 // n: the pads of the model IOKit has; listed: GameController's controllers of it; read: whether they are read that way already; due: a wait after the last change is over.
 // 1 read them, 0 do not, -1 not yet: a pad connected a moment ago may simply not be listed yet, so a model starts only after the wait, and stops at once
@@ -30,13 +29,18 @@ static inline int pad_dupes_want(int n, int listed, int read, int due) { return 
 
 // DM_HID_MAP: comma-separated NAME=usage entries over the default map (an unknown name or a usage past 32 is skipped)
 static void pad_hid_init(pad_hid *h, const char *map) {
-    static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
-    memset(h, 0, sizeof *h); h->hat = -1; memcpy(h->map, def, sizeof def);
+    static const uint8_t def_pos[DM_PAD_BTN_COUNT] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};   // Switch positions: bottom B, right A, left Y, top X
+    static const uint8_t def_lab[DM_PAD_BTN_COUNT] = {1, 2, 4, 5, 14, 15, 7, 8, 9, 10, 12, 11};   // printed labels: A, B, X, Y (Xbox, PlayStation)
+    const uint8_t *def = dm_pad_labels_mode() ? def_lab : def_pos;
+    memset(h, 0, sizeof *h); h->hat = -1; memcpy(h->map, def, sizeof def_pos);
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
-    for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
-        const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;
+    for (const char *s = map, *end; s && *s; s = end ? end + 1 : "") {
+        end = strchr(s, ',');
+        const char *eq = strchr(s, '=');
+        if (!eq || (end && eq > end)) continue;
+        int b = dm_pad_btn_index(s, (size_t)(eq - s));
         int u = atoi(eq + 1);
-        for (int b = 0; b < 16; b++) if ((size_t)(eq - s) == strlen(pad_hid_names[b]) && !strncasecmp(s, pad_hid_names[b], eq - s) && u >= 0 && u <= 32) h->map[b] = (uint8_t)u;
+        if (b >= 0 && u >= 0 && u <= 32) h->map[b] = (uint8_t)u;
     }
 }
 static int pad_hid_axis_of(uint32_t page, uint32_t usage) {   // -1: not a gamepad axis
@@ -60,11 +64,11 @@ static void pad_hid_stick(float x, float y, int32_t *ox, int32_t *oy) {
 static uint64_t pad_hid_buttons(const pad_hid *h) {
     static const uint64_t hat[8] = {DM_BTN_UP, DM_BTN_UP | DM_BTN_RIGHT, DM_BTN_RIGHT, DM_BTN_RIGHT | DM_BTN_DOWN, DM_BTN_DOWN, DM_BTN_DOWN | DM_BTN_LEFT, DM_BTN_LEFT, DM_BTN_LEFT | DM_BTN_UP};
     uint64_t m = 0;
-    for (int b = 0; b < 16; b++) if (h->map[b] && h->buttons >> (h->map[b] - 1) & 1) m |= 1ull << b;
+    for (int b = 0; b < DM_PAD_BTN_COUNT; b++) if (h->map[b] && h->buttons >> (h->map[b] - 1) & 1) m |= 1ull << b;
     if (h->hat >= 0 && h->hat < 8) m |= hat[h->hat];
     if (h->has[PH_BRAKE] && h->axis[PH_BRAKE] > 0) m |= DM_BTN_ZL;
     if (h->has[PH_ACCEL] && h->axis[PH_ACCEL] > 0) m |= DM_BTN_ZR;
-    return m;
+    return dm_pad_remap(m);
 }
 static void pad_hid_sticks(const pad_hid *h, int32_t s[4]) {   // lx, ly, rx, ry; HID's Y grows downward, the Switch's upward
     int z = h->has[PH_Z];

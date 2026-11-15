@@ -244,3 +244,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [AV1 movies stop an M1 iPad with SIGILL in dav1d](../../../docs/reference/movies.md#av1-movies-stop-an-m1-ipad-with-sigill-in-dav1d): the title movie on an M1 iPad Pro.
 - [`devicectl` copies a large RomFS image through the Mac's memory](../../../docs/reference/packing.md#devicectl-copies-a-large-romfs-image-through-the-macs-memory): the 26.2 GB image's pushes to an iPad filled a 16 GB Mac's swap and failed; now sent over AFC.
 - [`devicectl`'s `--remove-existing-content` empties the app's whole container](../../../docs/reference/packing.md#devicectls---remove-existing-content-empties-the-apps-whole-container): the first complete copy of the image, deleted by the DLC step after it.
+
+## Controller layout overlays
+
+`DM_PAD_LAYOUT=playstation` and `DM_PAD_LAYOUT=xbox` generate per-layout RomFS overlays (`overlay_playstation/`, `overlay_xbox/`) at pack time from the user's own `romfs.img` using [`oot_pad_overlay.py`](../../../scripts/oot_pad_overlay.py), [`oot_pad_overlay.m`](../../tools/oot_pad_overlay.m), and contributor-supplied diagrams ([DualSense](controller_dualsense.png), [Xbox](controller_xbox.png)), replacing the controller screen diagrams, callout banners, ocarina/keycap prompts, and shared-font glyphs (`L1`/`L2`/`R1`/`R2`, `LB`/`LT`/`RB`/`RT`) without storing any Nintendo assets in the repository.

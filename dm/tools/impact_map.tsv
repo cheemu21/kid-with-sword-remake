@@ -143,6 +143,10 @@ dm/host/front_mac.m	present:*	the Mac front end
 dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
+dm/host/pad_hid.h	hle:*hid*	controller layout mapping and physical HID input
+dm/tools/make_ext_font.py	*:*	shared-font button icons: every game's Mac and iOS build
+dm/tools/oot_pad_overlay.m	*:*	Ocarina of Time controller UI and font overlay generator
+scripts/oot_pad_overlay.py	*:*	Ocarina of Time controller UI and font overlay generator
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
 dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
 dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion transport and routing
