@@ -100,6 +100,10 @@ void dm_focus_set(int st) {
 }
 static int opmode(void) { return dm_opmode(); }
 
+// The SDK's backlight calls dereference am's absent CommonStateGetter.
+// The host does not control a Switch LCD; leave the host display on.
+HLE_FORCE("_ZN2nn2oe20SwitchLcdBacklightOnEv", "turn the handheld screen on (through am); the host has no Switch LCD", void, h_oe_LcdOn, void) {}
+HLE_FORCE("_ZN2nn2oe21SwitchLcdBacklightOffEv", "turn the handheld screen off (through am); the host has no Switch LCD", void, h_oe_LcdOff, void) {}
 // Screenshot / video recording switches: the host has no system screenshot service, no-op
 // Star Fox (SDK 21): the game marks the sections where it shows the player's own photographs (GameChat's camera pictures on screen); the system keeps those out of captures. No captures here
 HLE_FORCE("_ZN2nn2oe32BeginPresentPhotographedContentsEv", "photographed contents on screen: noted nowhere (no capture service)", void, h_oe_PhotoBegin, void) {}
@@ -274,6 +278,7 @@ static void oe_start(int index, const void *param, size_t n, int relaunch) {
     char hex[3 * 32 + 1] = "", call[192]; for (size_t i = 0; i < n && i < 32; i++) snprintf(hex + 3 * i, 4, " %02x", ((const uint8_t *)param)[i]);
     if (relaunch) snprintf(call, sizeof call, "%s", what); else snprintf(call, sizeof call, "%s(%d, %zu bytes of parameters:%s)", what, index, n, hex);
     int cur = (int)(DM_GAME_PROGRAM_ID & 0xf);
+    dm_gfx_quit_begin();   // this program ends: the pipeline archive starts writing now, beside the iPhone's notice (front_program_handoff, 1.5-3 s), and the exit waits for the rest
 #if !TARGET_OS_IPHONE
     static prog_plan P;
     if (oe_plan(index, param, n, relaunch, &P, call)) { dm_host_shutdown_then(what, prog_exec, &P); for (;;) pause(); }

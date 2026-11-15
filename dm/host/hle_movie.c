@@ -285,6 +285,12 @@ static void md_dims(const mdec_t *d, int *w, int *h, int *stride, int *slice) {
 // ---------- Host decoding thread ----------
 enum { MDJ_NONE, MDJ_DECODE, MDJ_CLOSE, MDJ_QUIT, MDJ_TAKE };
 static int md_threads(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n >= 8 ? 4 : 2; }
+vpx_codec_err_t md_vpx_open(vpx_codec_ctx_t *ctx, int vp9, unsigned w, unsigned h) {
+    vpx_codec_dec_cfg_t cfg = { .threads = (unsigned)md_threads(), .w = w, .h = h };
+    vpx_codec_err_t e = vpx_codec_dec_init(ctx, vp9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx(), &cfg, 0);
+    if (!e && vp9) vpx_codec_control(ctx, VP9D_SET_ROW_MT, 1);
+    return e;
+}
 // I420 → NV12 (stride = width, plane height = height); a smaller picture is padded with black, a larger one cropped
 void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int cw = (int)im->d_w < w ? (int)im->d_w : w, ch = (int)im->d_h < h ? (int)im->d_h : h;
@@ -323,13 +329,10 @@ void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
 static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
     const char *codec = d->type == MD_TYPE_VP8 ? "VP8" : "VP9";
     if (!d->vpx_on) {
-        vpx_codec_dec_cfg_t cfg = { .threads = (unsigned)md_threads(), .w = (unsigned)d->w, .h = (unsigned)d->h };
-        vpx_codec_iface_t *iface = d->type == MD_TYPE_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx();
-        vpx_codec_err_t e = vpx_codec_dec_init(&d->vpx, iface, &cfg, 0);
+        vpx_codec_err_t e = md_vpx_open(&d->vpx, d->type == MD_TYPE_VP9, (unsigned)d->w, (unsigned)d->h);
         if (e) { LOG("[RED] movie: libvpx failed to create the %s decoder: %s", codec, vpx_codec_err_to_string(e)); return 0; }
-        if (d->type == MD_TYPE_VP9) vpx_codec_control(&d->vpx, VP9D_SET_ROW_MT, 1);
         d->vpx_on = 1;
-        LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, cfg.threads);
+        LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, md_threads());
     }
     if (vpx_codec_decode(&d->vpx, p, (unsigned)n, NULL, 0)) {
         if (!d->red_dec++) LOG("[RED] movie: %s decode error (first case, %d bytes): %s %s", codec, n, vpx_codec_error(&d->vpx), vpx_codec_error_detail(&d->vpx) ? vpx_codec_error_detail(&d->vpx) : "");
@@ -785,6 +788,19 @@ HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: s
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (i < 0 || i >= MD_NIN || off < 0 || size < 0 || (uint32_t)off + (uint32_t)size > MD_INCAP) return 0x100b;
     dm_host_mutex_lock(&d->mu);
+    for (int k = 0; k < d->npend; k++) if (d->pend[k].in == i) { pthread_mutex_unlock(&d->mu); if (!d->red_dec++) LOG("[RED] movie: input index %d sent twice, the second packet is dropped (first case)", i); return 0x100b; }
+    // ACodec::BaseState::onInputBufferFilled takes ownership of a client buffer but keeps it once mPortEOS[input] is set; MediaCodec's queueInputBuffer still succeeds.
+    // Inputs already acquired before EOS can arrive afterwards, with or without the flag. Tied Together's Unity player submits all four held indices as EOS: decoding
+    // each one produced four completion callbacks, and the first freed the event list still being traversed. Return only a client's buffer, once, without another decode or signal.
+    if (d->in_eos) {
+        if (!d->inown[i] && !d->instale[i]) { pthread_mutex_unlock(&d->mu); return 0x100b; }
+        if (d->inown[i]) d->infree[d->ninfree++] = i;   // a stale buffer was already returned by Flush / Stop
+        d->inown[i] = d->instale[i] = 0;
+        pthread_mutex_unlock(&d->mu);
+        MD_TRACE(d, 7, "SendInputBufferForDecode index %d after end of stream: returned without decoding", i);
+        return 0;
+    }
+    if (d->npend == MD_NIN) { pthread_mutex_unlock(&d->mu); if (!d->red_dec++) LOG("[RED] movie: more packets pending than input buffers, one dropped (first case)"); return 0x100b; }
     // An index the client acquired before a Flush and sends after it (Big Brain Academy: Brain vs. Brain loops its activity previews this way): the flush put it back in the free list,
     // so it is claimed from there now. Before, it could be handed out a second time, two packets shared one buffer (VideoToolbox -12909 on the overwritten one) and the fifth pending
     // packet wrote past pend[] into npend and dmu (the process died destroying dmu, 2 runs in 5)
@@ -794,14 +810,12 @@ HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: s
         break;
     }
     d->inown[i] = d->instale[i] = 0;
-    if (flags & 4) d->in_eos = 1;   // the last input until Flush / Stop (h_movie_AcqIn)
-    for (int k = 0; k < d->npend; k++) if (d->pend[k].in == i) { pthread_mutex_unlock(&d->mu); if (!d->red_dec++) LOG("[RED] movie: input index %d sent twice, the second packet is dropped (first case)", i); return 0x100b; }
-    if (d->npend == MD_NIN) { pthread_mutex_unlock(&d->mu); if (!d->red_dec++) LOG("[RED] movie: more packets pending than input buffers, one dropped (first case)"); return 0x100b; }
     int fmt_now = 0;
     if (d->type == MD_TYPE_VP9 && !d->w && size > 0 && vp9_size(d->in[i] + off, size, &d->w, &d->h)) LOG("[movie] VP9 key frame: %d×%d", d->w, d->h);
     if (d->type == MD_TYPE_VP8 && !d->w && size > 0 && vp8_size(d->in[i] + off, size, &d->w, &d->h)) LOG("[movie] VP8 key frame: %d×%d", d->w, d->h);
     if (!d->fmt_sent) { d->fmt_sent = 1; fmt_now = 1; if (!d->w && !MD_AUDIO(d)) { d->w = 1920; d->h = 1080; } }   // the size is fixed from here on (slots are allocated by it)
     d->pend[d->npend].in = i; d->pend[d->npend].off = off; d->pend[d->npend].size = size; d->pend[d->npend].pts = pts; d->pend[d->npend].flags = flags; d->npend++;
+    if (flags & 4) d->in_eos = 1;   // commit only an accepted EOS: no more input until Flush / Stop
     int queued = d->npend;
     pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 7, "SendInputBufferForDecode index %d offset %d length %d time %lld µs flags %#x (%d packets queued)", i, off, size, (long long)pts, flags, queued);

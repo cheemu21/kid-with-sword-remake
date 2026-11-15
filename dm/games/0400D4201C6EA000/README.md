@@ -9,8 +9,9 @@ A Switch 2 game: update v327680 (1.1.1) over the base game, SDK 20.5.17 built fo
 | `mem_alias 0x500000000`, `mem_reserve 0x650000000` | [`game.tsv`](game.tsv) | `nninitStartup` asks `StandardAllocator` for 16 GB of address space, and this SDK keeps its 1 GB node area (no node-area cut matches it): with a 16 GB alias region `CentralHeap::Init` aborted (`sdk+0x13f698`) |
 | `mem_stack 0x10000000`, `app_pool 0x240000000` | `game.tsv` | Splatoon Raiders' values, the Switch 2's 9 GB, not measured here |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM declares 32 MB, so virtual address memory is on |
-| `render_cond on` | `game.tsv` | as the console does. Off, a rally looks the same and takes about 0.7 of 9.5 ms more GPU (one run each, with another job on the Mac) and logs a red line |
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): as the console does. Off, a rally looks the same and takes about 0.7 of 9.5 ms more GPU (one run each, with another job on the Mac) and logs a red line.
 
 The NRO and the archive need no key: the NSP script captures one and `shader_split.py` reads the other (below).
 
@@ -56,3 +57,4 @@ The work folder `0400D4201C6EA000-work` beside the dump has `run/boot.sh <log> <
 - [The submission-ready event counted as packets](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets): black movies, then corrupt frames.
 - [A passthrough geometry shader that writes the layer](../../../docs/reference/shaders.md#a-passthrough-geometry-shader-that-writes-the-layer): a blue wash over every 3D scene with atmosphere.
 - [Null vertex buffers bound past stream 15](../../../docs/reference/rendering.md#null-vertex-buffers-bound-past-stream-15).
+- [One libvpx setup for both decoder paths](../../../docs/reference/movies.md#one-libvpx-setup-for-both-decoder-paths): chopped sound in the opening movie, gone before the decoder had its own thread and not run since; one or two short gaps near its start are open.
