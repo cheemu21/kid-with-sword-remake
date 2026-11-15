@@ -959,14 +959,7 @@ static void npad_name(int p, char *out, size_t cap);
 static int cp_poll(void);
 static void read_pad(GCExtendedGamepad *g) {
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0 && !g_press_to_join) return;
-    _Static_assert(DM_BTN_A == 1u << B_A && DM_BTN_B == 1u << B_B && DM_BTN_X == 1u << B_X && DM_BTN_Y == 1u << B_Y, "face button bits");
-    uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
-    #define K(btn, bit) if (btn.isPressed) m |= 1ull << bit
-    K(g.leftShoulder, B_L); K(g.rightShoulder, B_R); K(g.leftTrigger, B_ZL); K(g.rightTrigger, B_ZR);
-    K(g.buttonMenu, B_PLUS); if (g.buttonOptions) K(g.buttonOptions, B_MINUS);
-    if (g.leftThumbstickButton) K(g.leftThumbstickButton, B_LS); if (g.rightThumbstickButton) K(g.rightThumbstickButton, B_RS);
-    K(g.dpad.left, B_LEFT); K(g.dpad.up, B_UP); K(g.dpad.right, B_RIGHT); K(g.dpad.down, B_DOWN);
-    #undef K
+    uint64_t m = dm_pad_buttons(g);   // by position (Switch layout), or by label (Nintendo pad / DM_PAD_LAYOUT), plus DM_PAD_MAP
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, a press the game also gets
         GCController *c = g.controller; char nb[16];
         if (!m) return;
