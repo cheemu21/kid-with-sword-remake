@@ -130,6 +130,15 @@ int main(void) {
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 4000 && w == 16);
     // A flush drops the waiting pictures and restarts the decoder; finalize frees it and destroys its event
     assert(!h_cv_vp9flush(dec) && d->nheld == 0 && d->vpx_ok && ev_set(ev));
+    // The frame step's movie signal (hle_movie.c dm_movie_hz): two pictures 1/60 s apart after a gap of a second make a 60-picture movie, a flush (a seek, a loop)
+    // keeps it and a stop ends it at once (this branch decodes on submission, so a released buffer takes each picture at once)
+    for (int k = 0; k < 2; k++) {
+        h_cv_vp9rel(dec, 1, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1);
+        assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000000000 + k * 16666667, false));
+    }
+    assert(dm_movie_hz() == 60);
+    assert(!h_cv_vp9flush(dec) && dm_movie_hz() == 60);
+    assert(!h_cv_vp9stop(dec) && dm_movie_hz() == 0);
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
     // A decoder initialised again in the same memory, cleared in between (Donkey Kong Bananza's second movie): its event is bound anew
     memset(dec, 0, sizeof dec);
