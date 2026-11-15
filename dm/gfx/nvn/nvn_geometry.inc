@@ -621,21 +621,93 @@ static void mtk_bind_key(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs) {
     k->vs = (__bridge void *)ms; k->fs = (__bridge void *)fs;
     k->fsfn = (__bridge void *)(ts ? ts->fn : ms ? ms->fn : nil);   // the third function, distinct from a specialized fragment
 }
+// Native mesh pipelines built in the background (DM_MESH_ASYNC; on in the app, which has a window, off in the unit tests): a native mesh draw has no stand-in, and its pipeline was
+// built at the draw while the frame waited. An iPhone 18 Pro (Ocarina of Time, FF11c with the pipeline archive, log 26) waited 4.2 s for 26 of them and 3.4 s for 20 more, one 1.4 s;
+// L1 without the archive (log 28) 2.75 s for one. Now a pipeline the archive does not hold is built on a worker (at most MTK_ASYNC_MAX at once) while its draws are skipped, and the
+// submit thread takes it at its next mesh draw (mtk_drain): the foliage or shadow it draws comes a few frames late the first time instead of stopping the game. Recorded as before
+// (an M row of pso_user.tsv for the next start's prewarm, and the archive's capture)
+enum { MTK_ASYNC_MAX = 3 };
+static int mtk_async_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_MESH_ASYNC"); v = e && *e ? atoi(e) != 0 : prepare_on(); if (v) MLOG("task / mesh pipelines the archive lacks are built in the background, their draws skipped meanwhile (DM_MESH_ASYNC=0: the draw waits)"); }
+    return v;
+}
+static id g_mtk_pending;   // the g_pso_mtk value of a key whose pipeline a worker builds
+typedef struct { pso_key k; void *ts, *ms, *fs, *ps; double ms_built; int archived; } mtk_done_t;   // ts / ms / fs / ps retained (ps NULL: failed)
+static os_unfair_lock g_mtk_dlk = OS_UNFAIR_LOCK_INIT; static mtk_done_t *g_mtk_done; static int g_mtk_ndone, g_mtk_cdone;
+static dispatch_semaphore_t g_mtk_sem; static uint64_t g_mtk_skipped, g_mtk_async_n;
+static void mtk_record(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, double ms_built, int archived, const char *how);
+static void mtk_drain(void) {   // the workers' finished pipelines into g_pso_mtk (submit thread)
+    os_unfair_lock_lock(&g_mtk_dlk); mtk_done_t *d = g_mtk_done; int n = g_mtk_ndone; g_mtk_done = NULL; g_mtk_ndone = g_mtk_cdone = 0; os_unfair_lock_unlock(&g_mtk_dlk);
+    for (int i = 0; i < n; i++) {
+        NvShader *ts = (__bridge_transfer NvShader *)d[i].ts, *ms = (__bridge_transfer NvShader *)d[i].ms, *fs = (__bridge_transfer NvShader *)d[i].fs;
+        id<MTLRenderPipelineState> ps = (__bridge_transfer id<MTLRenderPipelineState>)d[i].ps;
+        if (!ps) { MLOG("[RED] task / mesh pipeline failed in the background: task %s mesh %s fragment %s: its draws stay skipped", ts ? ts->key : "-", ms->key, fs ? fs->key : "-");
+                   hm_put_id(&g_pso_mtk, &d[i].k, NSNull.null); continue; }
+        hm_put_id(&g_pso_mtk, &d[i].k, ps);
+        mtk_record(&d[i].k, ts, ms, fs, d[i].ms_built, d[i].archived, "built in the background, its draws skipped meanwhile");
+    }
+    free(d);
+}
+static void mtk_record(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, double ms_built, int archived, const char *how) {
+    pso_key kk = *k; kk.fsfn = NULL;   // The third function has its own key column; this is not a specialized fragment.
+    const char *task = ts ? ts->key : "-";
+    pso_skey sk; char hex[sizeof sk * 2 + 1];
+    pso_skey_from(&kk, ms, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+    pso_record("M\t%s\t%s\n", task, hex); pso_user_record("M\t%s\t%s\n", task, hex);
+    MLOG("task / mesh pipeline: task %s mesh %s fragment %s, %.1f ms%s %s at frame %llu", task, ms->key, fs ? fs->key : "-",
+         ms_built, archived ? " (from the pipeline archive)" : "", how, (unsigned long long)atomic_load(&g_cur_frame));
+}
+// A pipeline the archive already holds, without building one (the first part of mtk_build): nil when it does not
+static id<MTLRenderPipelineState> mtk_archived(const pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs) {
+    if (!k || !ms || !ms->fn || (!ts && !ms->mesh_obj)) return nil;
+    MTLRenderPipelineDescriptor *d = pso_desc(k, nil, fs, nil, 0);
+    if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return nil;
+    id<MTLFunction> ff = d.fragmentFunction ?: mtk_nop_fragment();
+    pso4_init();
+    MTL4MeshRenderPipelineDescriptor *m4 = g_comp4 ? mtk_desc4(d, ts, ms, ff, k->border) : nil;
+    if (!m4) return nil;
+    int from_run = 0; id<MTLRenderPipelineState> ps = arch_lookup(m4, 0, &from_run);
+    if (ps) { g_mtk_arch++; if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(m4, 1); }
+    return ps;
+}
 static void mtk_claim(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, id<MTLRenderPipelineState> ps) {
     if (!ms || !ms->fn || !ps) return;
     mtk_bind_key(k, ts, ms, fs);
     id current = hm_get_id(&g_pso_mtk, k);
-    if (!current || current == NSNull.null) hm_put_id(&g_pso_mtk, k, ps);
+    if (!current || current == NSNull.null || current == g_mtk_pending) hm_put_id(&g_pso_mtk, k, ps);   // the prewarm's build serves a draw a worker builds for too
 }
 static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!raster || !g_mtk.ms || !g_mtk.ms->fn) return nil;
+    if (g_mtk_ndone) mtk_drain();   // a racy look: one missed now is taken at the next mesh draw
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1];
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     k.border |= border_need(ts, 3);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     mtk_bind_key(&k, ts, ms, fs);
     id ps = hm_get_id(&g_pso_mtk, &k);
+    if (ps && ps == g_mtk_pending) { g_mtk_skipped++; return nil; }   // a worker builds it: the draw is skipped
     if (ps) return ps == NSNull.null ? nil : ps;
+    if (mtk_async_on()) {
+        uint64_t t0 = bp_now();
+        if ((ps = mtk_archived(&k, ts, ms, fs))) { hm_put_id(&g_pso_mtk, &k, ps); mtk_record(&k, ts, ms, fs, (bp_now() - t0) / 1e6, 1, "required"); return ps; }
+        static dispatch_once_t once; dispatch_once(&once, ^{ g_mtk_pending = [NSObject new]; g_mtk_sem = dispatch_semaphore_create(MTK_ASYNC_MAX); });
+        hm_put_id(&g_pso_mtk, &k, g_mtk_pending); g_mtk_async_n++; g_mtk_skipped++;
+        pso_key kk = k; NvShader *bts = ts, *bms = ms, *bfs = fs;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            dispatch_semaphore_wait(g_mtk_sem, DISPATCH_TIME_FOREVER);
+            NSError *e = nil; int archived = 0; uint64_t b0 = bp_now();
+            id<MTLRenderPipelineState> built = mtk_build(&kk, bts, bms, bfs, &e, &archived);
+            double took = (bp_now() - b0) / 1e6;
+            dispatch_semaphore_signal(g_mtk_sem);
+            mtk_done_t r = {kk, (__bridge_retained void *)bts, (__bridge_retained void *)bms, (__bridge_retained void *)bfs, (__bridge_retained void *)built, took, archived};
+            os_unfair_lock_lock(&g_mtk_dlk);
+            if (g_mtk_ndone == g_mtk_cdone) { g_mtk_cdone = g_mtk_cdone ? g_mtk_cdone * 2 : 16; g_mtk_done = realloc_or_die(g_mtk_done, (size_t)g_mtk_cdone * sizeof *g_mtk_done, "the finished mesh pipelines"); }
+            g_mtk_done[g_mtk_ndone++] = r;
+            os_unfair_lock_unlock(&g_mtk_dlk);
+        });
+        return nil;
+    }
     NSError *error = nil; uint64_t start = bp_now(); int archived = 0;
     ps = mtk_build(&k, ts, ms, fs, &error, &archived);
     uint64_t elapsed = bp_now() - start;

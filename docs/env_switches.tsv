@@ -316,6 +316,7 @@ DM_PSO_PREBUILD	player	`0` turns off the prebuild of every known shader pair's p
 DM_PSO_PREBUILD_DEPTH	switch	`zero`: the prebuild tool (`DM_PSO_PREBUILD=tool`) builds bases for the near = 0 depth mode; the NSP script sets it from the profile's `depth_mode`
 DM_PSO_PREBUILD_THREADS	switch	`=<n>`: the workers of the prebuild tool (`DM_PSO_PREBUILD=tool`; default: Metal's concurrent compiles, `maximumConcurrentCompilationTaskCount`)
 DM_PSO_PREPARE	switch	`0` runs the prewarm in the background while the game starts, as without a window; `1` makes the first submission wait for the prewarm lists also without a window
+DM_PSO_PREPARE_BUDGET	switch	`=<seconds>`: how long a start waits for the prepare step before the game goes on, the rest of the prewarm lists built in the background on two workers at utility QoS (default `0`: the start waits for every line; a 10 s budget without the Metal 4 path made an iPhone's first start stutter and freeze, `nvn_mtl.m` `prepare_budget`)
 DM_PSO_PREPARE_THREADS	switch	`=<n>`: the workers of the prepare step that builds the prewarm lists before the first frame (default: the device's active cores)
 DM_PSO_PULL_ALL	diagnostic	`=1`: every draw that has a pulling pipeline draws with it, never with the pipeline for its vertex layout
 DM_PSO_RECORD	path	`=<file>`: appends the shaders and pipelines used in the run to that file, for re-recording the prewarm manifest
@@ -404,6 +405,7 @@ DM_TEST_UP_LOST	diagnostic	`=<batch index>` treats that batch of uploads as drop
 DM_THERMAL_CAP	switch	`0` turns off the thermal cap, which holds the frame step at 30 fps while iOS reports a serious or critical thermal state (on by default)
 DM_THR	diagnostic	`=1` logs each SVC (except `SleepThread`) with its first four arguments, and each `CreateThread` with entry, stack, priority and core
 DM_THRCPU	diagnostic	`=<tsv path>[,<seconds>]` writes each thread's CPU time (100% = one core) and the total every interval (default 10 s); on iOS a relative path is under `Documents`
+DM_THREAD_DUMP_AT	diagnostic	`=<seconds>`: that many seconds after start, every guest thread's wait (kind, object, guest stack in an SVC) is logged with no thread suspended, as the iPhone logs it the first 3 times the app leaves the screen (a game that stopped going on: what it waits for)
 DM_TOUCH_HAPTICS	player	`0` turns off the light haptic tap when a touch control is pressed (on by default); launcher setting
 DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen read with touch points (sample, finger, position, attributes) and each gesture entry, up to 500 lines
 DM_T_DUMP	test	`tests/t_blend_zero.m` prints the red channel each draw stored, row by row

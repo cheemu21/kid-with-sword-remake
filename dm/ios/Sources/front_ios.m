@@ -561,7 +561,11 @@ void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
         case 0: dm_gamepad_reset(); dm_focus_set(2); break;
-        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
+        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3);
+            // The game's threads as they stand, the first 3 times the app leaves the screen: a player leaves a game that has stopped going on (the owner's log after the
+            // Master Sword: the same white frame for 5 minutes, no error), and this is what each thread waits for (hle_thread.c svc_thread_dump_live: suspends no thread)
+            { void svc_thread_dump_live(void); static int n; if (n++ < 3) { LOG("app to the background: the game's threads as they stand (what a game that stopped going on waits for)"); svc_thread_dump_live(); } }
+            g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;

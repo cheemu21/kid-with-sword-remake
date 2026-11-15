@@ -56,10 +56,14 @@ fps_payback	off
 # The touch controls' Forest colours: blue A, green B, yellow X / Y, red +, deep green shoulders, bronze D-pad, gold rims, all translucent (DmGamepad.m theme_init)
 pad_theme	forest
 # FF (the kid-with-sword-remake fork's experimental iPhone build of nxnative main): the iPhone's settings from the fork's X line.
-# Render pipelines through Metal 4 on the iPhone, with the pipeline archive made offline for the iPhone 18 Pro's GPU (A20 Pro, g19p): draws start from ready bases instead of
-# building their pipelines at their first draw (the fork's X3 and later)
+# Render pipelines through Metal 4 with hybrid stand-ins, the pipeline bases built on the phone (L2): one IPA for every iPhone, no archive made offline. Build it with --gpu none
+# (the NSP script; pso_gpu has no "none", and without it the profile would get the A19's archive). The first start builds the base of every shader pair behind "Preparing pipelines"
+# (pso_prebuild, about 37,000), once per chain version and iOS major version, into the app's pso_archive/; later starts take them from there.
+# Why not the MTLDevice path without bases (FF12 and L1, as the fork's Mario Kart World port): every pipeline the prewarm lists did not hold was built while the frame waited, and this
+# game has about 37,000 shader pairs against the lists' 4,443 render pipelines. An iPhone 18 Pro (log 30, L1, 30 fps) built 264 such pipelines at about 213 ms each in 212 s of play:
+# 56 s of freezes, the worst 8-10 s for 30-37 pipelines at once. With bases a draw takes its stand-in at once and its own pipeline comes from the background.
+# Before (X3 to FF11): pso_mtl4 on and pso_gpu g19p, the iPhone 18 Pro's archive made offline and shipped in the app (4.9 GB)
 pso_mtl4	on
-pso_gpu	g19p
 # Frame buffering: each present is copied, so the game's swapchain texture is free at once (the fork's V17, a steady 30 fps)
 present_snap	on
 # Handheld, as an iPhone runs it: the game presents 1920x1080 instead of 2048x1152 docked

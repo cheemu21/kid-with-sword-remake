@@ -1935,7 +1935,12 @@ __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac)
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline
+typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms, rd_mb; unsigned pso, lib, up, rup, hy, pgin; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; rd_mb / pgin: the process's storage reads and page-ins over the frame
+// The process's storage reads and page-ins so far (proc_pid_rusage; libproc.h, which the iOS SDK does not have): a long frame whose submission and GPU are short can be the game's own
+// thread waiting on storage, its guest memory paged back in (DM_GUEST_FILE) or its files read; the long-frame line gives both, as the [mem] line gives them every 10 s (hle_svc.c)
+#include <sys/resource.h>
+int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);
+static void lf_io(uint64_t *rd, uint64_t *pgin) { struct rusage_info_v4 ru; if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ru)) { *rd = *pgin = 0; return; } *rd = ru.ri_diskio_bytesread; *pgin = ru.ri_pageins; }
 static lf_rec g_lf[LFN];
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
@@ -2533,10 +2538,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         static uint64_t plib, ppso; uint64_t lib_, pso_; mtl_create_stats(&lib_, &pso_);
         trow(f, "@lib_new", (double)(lib_ - plib)); trow(f, "@pso_new", (double)(pso_ - ppso));
         {   // long-frame log: this frame's items are first recorded into the ring; whether to print is decided 8 frames later, once the GPU time has arrived (see below)
-            static uint64_t plns, ppns, pup, prup, pub, phy; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_);
+            static uint64_t plns, ppns, pup, prup, pub, phy, prd, ppg; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_, rd, pg; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_); lf_io(&rd, &pg);
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
-            r->hy = (unsigned)(hy - phy); plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy;
+            r->hy = (unsigned)(hy - phy); r->rd_mb = prd && rd >= prd ? (rd - prd) / 1048576.0 : 0; r->pgin = ppg && pg >= ppg ? (unsigned)(pg - ppg) : 0;
+            plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy; prd = rd; ppg = pg;
         }
         plib = lib_; ppso = pso_;
         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
@@ -2552,8 +2558,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;
           if (r->f == f - 8) { ef += ((r->fr < 3 * ef ? r->fr : 3 * ef) - ef) / 16; eg += ((g < 3 * eg ? g : 3 * eg) - eg) / 16; }
           if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[512];
-              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; draws with a hybrid pipeline %u",
-                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
+              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; draws with a hybrid pipeline %u; storage read %.1f MB, page-ins %u",
+                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy, r->rd_mb, r->pgin);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }

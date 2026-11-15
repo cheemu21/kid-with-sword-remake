@@ -701,6 +701,7 @@ static void thr_bt(thr_t *t) {
     }
     thread_resume(t->mport);
 }
+static int g_dump_live;   // svc_thread_dump_live: no thread is suspended
 void svc_thread_dump(void) {
     static const char *kinds[] = {"running/not waiting", "mutex", "condvar", "address", "sync object"};
     int nh = 0; for (int i = 1; i < MAX_H; i++) nh += g_h[i].type != O_FREE;
@@ -743,11 +744,11 @@ void svc_thread_dump(void) {
                     if (m2 && stk[i] - (uint64_t)m2->base < m2->text_end) { q += snprintf(sl + q, sizeof sl - q, " [%d]%s+%#llx", i * 8, m2->name, stk[i] - (uint64_t)m2->base); nfr++; } }
                 q += snprintf(sl + q, sizeof sl - q, " | x19=%#llx x20=%#llx x21=%#llx x22=%#llx x23=%#llx x24=%#llx x25=%#llx x26=%#llx x27=%#llx x28=%#llx", sr[19], sr[20], sr[21], sr[22], sr[23], sr[24], sr[25], sr[26], sr[27], sr[28]);
                 fprintf(stderr, "%s\n", sl); } }
-        thr_bt(t);
+        if (!g_dump_live) thr_bt(t);
     }
     // Threads created by the host itself (graphics present, audio, movie decoding, etc.): not in the guest thread table, enumerated as mach threads, the first 12 frames symbolized with dladdr
     thread_act_array_t ths; mach_msg_type_number_t nth = 0;
-    if (task_threads(mach_task_self(), &ths, &nth) == KERN_SUCCESS) {
+    if (!g_dump_live && task_threads(mach_task_self(), &ths, &nth) == KERN_SUCCESS) {
         for (mach_msg_type_number_t i = 0; i < nth; i++) {
             int guest = 0; for (thr_t *t = g_all; t; t = t->all) if (t->mport == ths[i]) { guest = 1; break; }
             if (!guest && ths[i] != mach_thread_self() && thread_suspend(ths[i]) == KERN_SUCCESS) {
@@ -772,6 +773,21 @@ void svc_thread_dump(void) {
         }
         vm_deallocate(mach_task_self(), (vm_address_t)ths, nth * sizeof *ths);
     }
+}
+// The same dump while the game runs on (front_ios.m: the app leaving the screen): under G, so no thread is freed during the walk, and with no thread suspended (a thread stopped
+// while it holds the log's or the allocator's lock would stop this one too): each thread's wait, the object it waits on and, in an SVC, its guest stack, without thr_bt's backtraces
+// and the host threads. G is tried for at most 200 ms: a guest thread holding it longer is skipped over, not waited for
+void svc_thread_dump_live(void) {
+    int got = 0; for (int i = 0; i < 200 && !(got = !pthread_mutex_trylock(&G)); i++) usleep(1000);
+    if (!got) { fprintf(stderr, "[dm] thread dump skipped: the thread table stayed busy for 200 ms\n"); return; }
+    g_dump_live = 1; svc_thread_dump(); g_dump_live = 0;
+    pthread_mutex_unlock(&G);
+}
+// DM_THREAD_DUMP_AT=<s> (diagnostic): the live dump that many seconds after start, as the iPhone prints it when the app leaves the screen
+static void *dump_at_main(void *p) { sleep((unsigned)(uintptr_t)p); fprintf(stderr, "[dm] DM_THREAD_DUMP_AT: the game's threads as they stand\n"); svc_thread_dump_live(); return NULL; }
+__attribute__((constructor)) static void dump_at_start(void) {
+    const char *e = getenv("DM_THREAD_DUMP_AT"); if (!e || atoi(e) <= 0) return;
+    pthread_t th; if (!pthread_create(&th, NULL, dump_at_main, (void *)(uintptr_t)atoi(e))) pthread_detach(th);
 }
 
 // Same-core wake handoffs apply to every game. core_preempt additionally checks

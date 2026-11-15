@@ -6587,7 +6587,7 @@ enum { VC_WAYS = 4, VC_MAX = 16384 };
 typedef struct { const void *pool; unsigned next; vc_key k[VC_WAYS]; void *view[VC_WAYS];   // view: retained
                  void *rows, *rows_of; uint64_t rows_rid, rows_n; } vc_set;   // rows: a texture buffer as 2D rows (tbuf_as_2d; retained, resident), rows_of / rows_n: the buffer texture it was made from and its element count
 static nvn_hmap g_vc = {.klen = 8};   // texture serial → vc_set
-static uint64_t g_vc_hit, g_vc_new;
+static uint64_t g_vc_hit, g_vc_new, g_vc_m_noset, g_vc_m_key, g_vc_m_base, g_vc_clears;   // misses: no entry for the texture, no way with the key, a way made from a base since replaced; whole-cache clears at VC_MAX
 static void vc_rows_drop(vc_set *s) { if (s->rows) { defer_obj_release((__bridge id)s->rows); CFRelease(s->rows); s->rows = s->rows_of = NULL; s->rows_rid = s->rows_n = 0; } }
 static void vc_set_free(void *p) {
     vc_set *s = p;
@@ -6596,12 +6596,14 @@ static void vc_set_free(void *p) {
     free(s);
 }
 static id<MTLTexture> vc_get(uint64_t ser, const vc_key *k, id<MTLTexture> base) {
-    vc_set *s = nvn_hm_get(&g_vc, &ser); if (!s) return nil;
+    vc_set *s = nvn_hm_get(&g_vc, &ser); if (!s) { g_vc_m_noset++; return nil; }
     for (int i = 0; i < VC_WAYS; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) {
         id<MTLTexture> v = (__bridge id<MTLTexture>)s->view[i];
         if (v.parentTexture == base) { g_vc_hit++; return v; }
+        g_vc_m_base++;
         defer_obj_unref(v); CFRelease(s->view[i]); s->view[i] = NULL; return nil;   // made from a base texture since replaced
     }
+    g_vc_m_key++;
     return nil;
 }
 static vc_set *vc_set_for(uint64_t ser, const void *pool) {   // the texture's entry, made if needed; NULL for a texture already finalized (resolved through g_ghost): nothing would drop the entry
@@ -6609,7 +6611,7 @@ static vc_set *vc_set_for(uint64_t ser, const void *pool) {   // the texture's e
     if (!live) return NULL;
     vc_set *s = nvn_hm_get(&g_vc, &ser);
     if (!s) {
-        if (g_vc.n >= VC_MAX) nvn_hm_clear(&g_vc, vc_set_free);
+        if (g_vc.n >= VC_MAX) { nvn_hm_clear(&g_vc, vc_set_free); g_vc_clears++; }
         if (!(s = calloc(1, sizeof *s))) return NULL;
         s->pool = pool; nvn_hm_put(&g_vc, &ser, s);
     }
@@ -6620,6 +6622,8 @@ static void vc_put(uint64_t ser, const void *pool, const vc_key *k, id<MTLTextur
     unsigned i = s->next++ % VC_WAYS;
     if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
     s->k[i] = *k; s->view[i] = (void *)CFBridgingRetain(v); g_vc_new++;
+    if (g_vc_new % 50000 == 0) MLOG("texture views made: %llu (reused %llu); misses: no entry for the texture %llu, a new view of a cached texture %llu, its base replaced %llu; cache cleared whole %llu times, %u textures now",
+                                    (unsigned long long)g_vc_new, (unsigned long long)g_vc_hit, (unsigned long long)g_vc_m_noset, (unsigned long long)g_vc_m_key, (unsigned long long)g_vc_m_base, (unsigned long long)g_vc_clears, g_vc.n);
 }
 void mtl_vc_drop(uint64_t ser) { os_unfair_lock_lock(&g_rmu); vc_set *s = nvn_hm_del(&g_vc, &ser); if (s) vc_set_free(s); os_unfair_lock_unlock(&g_rmu); }
 void mtl_vc_stats(unsigned *n, uint64_t *hit, uint64_t *made) { os_unfair_lock_lock(&g_rmu); *n = g_vc.n; *hit = g_vc_hit; *made = g_vc_new; os_unfair_lock_unlock(&g_rmu); }
@@ -9337,7 +9341,13 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
 // After satisfying the first pipeline miss in a submission, scan ahead once along the remaining commands (replaying state only, no drawing) and kick a bounded number of normal-pass pipelines to the background;
 // when the submit thread reaches that draw it only waits for 'the remaining time not yet compiled'. The compiled pipelines are identical to synchronously compiled ones (same descriptor). Pipeline keys of merged passes / specialized fragments depend on the planning result at replay time, are not predicted, and are compiled synchronously as before.
 #define PSO_PEND_MAX 384
-enum { PSO_PEND_ACTIVE = 2, PSO_PREDICT_BUDGET = 2 };
+enum { PSO_PEND_ACTIVE = 2, PSO_PREDICT_BUDGET = 2, PSO_PEND_ACTIVE_PLAIN = 6, PSO_PREDICT_BUDGET_PLAIN = 6 };
+// Without hybrid pipelines (DM_PSO_MTL4=0, no pipeline archive) a draw has no stand-in: every pipeline the prediction does not start is built on the submit thread while the frame waits,
+// one after another. Ocarina of Time on the Mac (M5, 2026-11-15) waited 1,021 ms in one frame for 5 first-seen pipelines (about 200 ms each: its material shaders run to 4,000 lines);
+// built side by side they cost about one. So that path starts up to 6 at a time, the Metal 4 path keeps its demand-first 2 (its draws do not wait)
+static int hybrid_on(void);
+static int pp_spec_active(void) { return hybrid_on() ? PSO_PEND_ACTIVE : PSO_PEND_ACTIVE_PLAIN; }
+static int pp_predict_budget(void) { return hybrid_on() ? PSO_PREDICT_BUDGET : PSO_PREDICT_BUDGET_PLAIN; }
 // order: admission order (the oldest finished, untaken entry is reclaimed first); demand: a build a draw asked for while it draws with its pulling stand-in (hybrid pipelines),
 // outside the speculative limit; run: 0 queued, 1 taken by its worker; d: the descriptor while queued (a draw that would wait for a queued build makes the pipeline itself:
 // pso_pend_take); gen tells a slot's fills apart, so a worker whose slot was taken that way and filled again does nothing
@@ -9373,7 +9383,7 @@ static int pso_pend_slot(const pso_key *k, int spec, uint32_t *gen) {
         else if (!g_pp[i].done) active += !g_pp[i].demand;
         else if (reclaim < 0 || g_pp[i].order < g_pp[reclaim].order) reclaim = i;
     }
-    if (spec && active >= PSO_PEND_ACTIVE) return -1;
+    if (spec && active >= pp_spec_active()) return -1;
     if (slot < 0) slot = reclaim;
     if (slot < 0) return -1;
     g_pp[slot].k = *k; g_pp[slot].ps = nil; g_pp[slot].d = nil; g_pp[slot].done = g_pp[slot].run = 0; g_pp[slot].used = 1; g_pp[slot].demand = !spec;
@@ -10053,16 +10063,31 @@ static int prepare_workers(void) {
     if (n <= 0) { size_t sz = sizeof n; if (sysctlbyname("hw.activecpu", &n, &sz, NULL, 0) || n < 2) n = 2; }
     return n;
 }
-static void warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
+// How long a start waits for the prepare step before the game goes on (DM_PSO_PREPARE_BUDGET=<seconds>; 0, the default: until every line is built), the rest built by warm_rest_bg on two
+// workers at utility QoS. Without the Metal 4 path (DM_PSO_MTL4=0, no pipeline archive) a first start builds every pipeline of the lists from nothing: 128 s on an M5 Mac (4,664 render and
+// 552 compute pipelines, 12,718 shaders), a later start about a second from the Metal shader cache. A 10 s budget was tried there (FF12) and made the first start worse on an iPhone 18 Pro
+// (log 28, a phone at thermal state 2): 10 s built 6,668 of 17,862 lines but 263 of the render pipelines, the background building took the CPU from the game (frames of 40-100 ms with
+// 1 ms of submission and 5 ms of GPU), and entering the game built about 20 task / mesh pipelines on the submit thread, 50-80 ms each and one 2.75 s, while the GPU queues waited 6.5 s
+static double prepare_budget(void) {
+    static double b = -1;
+    if (b < 0) { const char *e = getenv("DM_PSO_PREPARE_BUDGET"); b = e && *e ? atof(e) : 0; if (b < 0) b = 0; }
+    return b;
+}
+static long warm_prepare(NSArray<WarmTask *> *tasks, long lines) {   // → the index of the first task not handed to a worker (tasks.count when all ran)
     int workers = prepare_workers(); long n = (long)tasks.count;
     uint64_t t0 = bp_now(), built0 = g_pb_built, arch0 = g_pb_archived, reused0 = g_pb_reused, spec0 = g_pb_spec;
-    __block _Atomic long next = 0;
+    __block _Atomic long next = 0; __block _Atomic int stop = 0;
+    double budget = prepare_budget();
     dispatch_group_t g = dispatch_group_create();
     for (int w = 0; w < workers; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        for (;;) { long i = atomic_fetch_add(&next, 1); if (i >= n) break; warm_task(tasks[(NSUInteger)i]); }
+        for (;;) { if (atomic_load(&stop)) break; long i = atomic_fetch_add(&next, 1); if (i >= n) break; warm_task(tasks[(NSUInteger)i]); }
     });
     int shown = 0;
     while (dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW, 50 * (int64_t)NSEC_PER_MSEC))) {
+        if (budget > 0 && !atomic_load(&stop) && (bp_now() - t0) / 1e9 >= budget) {   // the rest goes to the background (warm_rest_bg): only the workers' compiles under way are waited for
+            atomic_store(&stop, 1);
+            MLOG("pipeline prepare: %ld of %ld lines done after %.1f s (DM_PSO_PREPARE_BUDGET): the game starts, the rest are built in the background", (long)g_warm_done, lines, (bp_now() - t0) / 1e9);
+        }
         // the screen shows past 0.5 s, unless the rate so far says the rest takes less than 0.3 s more (no screen that flashes up and goes)
         uint64_t el = bp_now() - t0; long done = g_warm_done; double rest = done ? (double)el * (double)(lines - done) / (double)done : 1e18;
         if (!shown && el >= 500000000ull && rest >= 3e8) { shown = 1; MLOG("pipeline prepare: %ld of %ld lines done after %.1f s, the progress screen shows", done, lines, el / 1e9); }
@@ -10075,6 +10100,22 @@ static void warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
          "bases %llu compiled, %llu from the archive%s, %llu reused; %llu specializations",
          lines, (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_cps, (bp_now() - t0) / 1e9, workers, shown ? "shown" : "not shown",
          (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0), again, (unsigned long long)(g_pb_reused - reused0), (unsigned long long)(g_pb_spec - spec0));
+    long from = atomic_load(&next); return from < n ? from : n;
+}
+// The lines the prepare step's budget left (prepare_budget), from index from on: two workers at utility QoS, which the game's threads come before, then warm_finish as the prewarm
+// does. A draw that needs a pipeline not built yet builds it itself meanwhile, as without the prewarm; the next start finds them all in the Metal shader cache
+static void warm_rest_bg(NSArray<WarmTask *> *tasks, long from) {
+    long n = (long)tasks.count; uint64_t t0 = bp_now();
+    long *next = malloc(sizeof *next); if (!next) MDIE("prewarm counter"); *next = from;
+    dispatch_group_t g = dispatch_group_create();
+    for (int w = 0; w < 2; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        for (;;) { long i = __atomic_fetch_add(next, 1, __ATOMIC_RELAXED); if (i >= n) break; @autoreleasepool { warm_task(tasks[(NSUInteger)i]); } }
+    });
+    dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        free(next);
+        MLOG("pipeline prewarm: the %ld lines left by the prepare step were built in the background in %.1f s", n - from, (bp_now() - t0) / 1e9);
+        @autoreleasepool { warm_finish(); }
+    });
 }
 // The prebuild in the prepare step: the bases of every shader pair are made before the game's first frame, behind the progress screen ("Preparing pipelines"), once per chain
 // version, depth mode and pair list (prebuilt.tsv), so a running game never compiles them meanwhile. Built in the background while playing, they took an iPhone 17 Pro Max's GPU
@@ -10122,8 +10163,9 @@ static void warm_start(void) {
     atomic_store(&g_warm_running, 1);
     if (prepare_on()) {
         long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(paths, &lines);
-        if (lines) warm_prepare(tasks, lines);
-        else MLOG("pipeline prepare: the prewarm lists hold nothing to build");
+        long from = lines ? warm_prepare(tasks, lines) : (long)tasks.count;
+        if (!lines) MLOG("pipeline prepare: the prewarm lists hold nothing to build");
+        if (from < (long)tasks.count) { warm_rest_bg(tasks, from); return; }   // the budget ran out (prepare_budget): warm_finish once the rest are built
         warm_finish();
         @autoreleasepool { prepare_prebuild(); }   // then the bases every shader pair's hybrid draws need, before the first frame too (once)
         return;
@@ -12029,7 +12071,7 @@ static void pso_predict_rest_(void) {
     // With hybrid pipelines a predicted draw whose pulling stand-in is ready (made here, from its base made or archived: the work its draw would do) will not wait, and builds
     // its own pipeline on demand (pso_pend_demand); the budget goes to the draws that would wait (a pair whose pulling base is not made yet)
     int admitted = 0, hy = hybrid_on();
-    for (int i = 0; i < na + nb && admitted < PSO_PREDICT_BUDGET; i++) {
+    for (int i = 0; i < na + nb && admitted < pp_predict_budget(); i++) {
         const pso_key *qk = i < na ? &qa[i].k : &qb[i - na].k; NvShader *qv = (__bridge NvShader *)(i < na ? qa[i].vs : qb[i - na].vs), *qf = (__bridge NvShader *)(i < na ? qa[i].fs : qb[i - na].fs);
         if (hm_get_id(&g_pso, qk)) continue;
         if (pso_base_made(qk, qv, qf)) { hm_put_id(&g_pp_easy, qk, NSNull.null); continue; }
