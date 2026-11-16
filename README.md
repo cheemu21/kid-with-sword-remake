@@ -37,7 +37,7 @@ The latest nxnative engine with this port's iPhone fixes on top, and the white s
 
 ```
 xcodebuild -downloadComponent MetalToolchain
-git clone -b ff https://github.com/cheemu21/kid-with-sword-remake.git && cd kid-with-sword-remake
+git clone -b L https://github.com/cheemu21/kid-with-sword-remake.git && cd kid-with-sword-remake
 brew install xcodegen zstd glslang
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
