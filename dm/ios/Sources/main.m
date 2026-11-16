@@ -226,6 +226,10 @@ static NSString *program_env(void) {
         // The in-game menu's Amiibo list (GameMenu.swift) writes the chosen amiibo's ID into Documents/amiibo.txt; the host reads it at each scan (hle_sdk16.c StartDetection, amiibo.h dm_amiibo_select)
         if ([fm fileExistsAtPath:[ov stringByAppendingPathComponent:@"amiibo.tsv"]]) setenv("DM_AMIIBO", [doc stringByAppendingPathComponent:@"amiibo.txt"].fileSystemRepresentation, 0);
     }
+    // The RomFS of the application's other programs (scripts/pack_nup.py, a Switch 2 Edition's Switch 1 program), which the game mounts by program index (hle_fs.c): in the app beside its
+    // RomFS, also when that RomFS is Documents/romfs.img
+    NSString *sib = [(prog ? [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:prog] : NSBundle.mainBundle.resourcePath) stringByAppendingPathComponent:@"romfs_programs"];
+    if ([fm fileExistsAtPath:sib]) setenv("DM_ROMFS_PROGRAMS", sib.fileSystemRepresentation, 0);
     setenv("DM_NVN_SHMAP", [dmdir stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
     NSString *control = [dmdir stringByAppendingPathComponent:@"control.nacp"];   // the game's control data (build_ipa.sh program_tables; hle_fs.c control_read)

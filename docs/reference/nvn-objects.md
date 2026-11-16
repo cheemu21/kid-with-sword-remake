@@ -561,7 +561,7 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** the frame's blocking SyncWait on its newest fence wakes about 0.26–0.29 ms after the GPU end (M2 Max; the wait ledger, `DM_NVN_WAITS=1`), on the critical path of every frame.
 - **Cause:** the waiter slept until the commit feedback handler of the fence's submission had run, which comes that long after the GPU end.
 - **Fix:** the game's waits (newest fence, older fence, acquire sync) wait on `g_ev`, which the queue signals after each submission, and then make the CPU-side writes of every submission up to the fence that no handler has made yet (`post_early`: events, samples-passed and counter reports; a ring of `POST_RING` records, each run once by whichever comes first). A counter report of the fence's last segment takes the wake as that segment's end. `DM_NVN_FAST_WAKE=0` turns it off.
-- **Note:** the commit feedback handler's other blocks (diagnostics such as `DM_NVN_FUSE_CHECK`) still run when the handler does, after a fast-woken wait has returned.
+- **Note:** the commit feedback handler's other blocks (diagnostics) still run when the handler does, after a fast-woken wait has returned.
 - **Resolved in review of #158:** claiming a record is not completion. The original early path skipped records a handler or another waiter owned and advanced `g_done` before their writes finished; a delayed callback also retained a recyclable slot pointer. `post_claim` now holds `g_post_mu` through `post_run`, and both contenders call `post_complete` with their fence to apply earlier records in order. A slot is reused under that lock only after its writes finish; an old fence cannot claim its new generation. `g_done` and `g_fence` are atomic.
 - **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_perf_order` covers a paused completion owner, a competing waiter, recycled-slot generations, event order and exactly-once writes, with direct/deferred encoding and fast wake disabled. `t_perf_order --cpu` and `perf-order-tsan` run the completion cases without a GPU in CI. The original harness reproduced premature completion; the corrected CPU cases pass ThreadSanitizer. Current gameplay coverage and timing limits are recorded in [BotW](../../dm/games/01007EF00011E000/README.md#final-synchronization-and-pass-validation-2026-10-26-current) and [Metroid Dread](../../dm/games/010093801237C000/README.md#final-gameplay-validation-2026-10-26-current); [13 Sentinels](../../dm/games/01003FC01670C000/README.md#rendering) has additional menu/report traffic coverage.
 - **Finite timeout budget:** when the event wait times out, the feedback wait uses only the remaining requested time. Previously an expired 20 ms event wait could be followed by another full 20 ms feedback wait. Elapsed time is taken from the monotonic wait clock independently of wait diagnostics. Zero/sub-millisecond polls, successful CPU completion, and the existing per-stage one-hour cap for `UINT64_MAX` are unchanged. This bounds the time assigned to the two waits, not scheduling delays or the CPU completion lock.
@@ -951,6 +951,13 @@ Games read this count as a position in their own command memory and size their h
 
 ## NVN entry points
 
+### Sampler builder queries leave renderer state unread
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderGetLodBias`, `nvnSamplerBuilderGetCompare`, `nvnSamplerBuilderGetBorderColor`, `nvnSamplerBuilderGetMaxAnisotropy` or `nvnSamplerBuilderGetReductionFilter` during renderer setup.
+- **Cause:** the setters stored these values, but the builder getters still reached the generic unimplemented handler. Output parameters were left untouched, and scalar results did not follow the getters' float or enum return signatures.
+- **Fix:** the five getters read the builder's current sampler parameters through their typed NVN entry points, including the values restored by `SetDefaults`.
+- **Found on:** [Digimon Story Time Stranger, issue #872](https://github.com/seedds/nxnative/issues/872), whose reporter identified these calls before an early crash. No repository profile exists yet. Archive extraction, rendering and the reported iPhone freeze are separate unresolved parts of that report; these getters alone do not establish that the game runs.
+
 ### Integer sampler border colours
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderSetBorderColorui` during renderer initialization.
@@ -963,7 +970,7 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** `[RED] sampler ID 4096 not registered` (or another ID past the sampler pool), once, from the first frames on.
 - **Cause:** NVN's texture, separate texture and sampler handles are 64-bit, but the driver writes each bound one into the c2 handle table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half. The host kept the whole 64 bits of the handles of `nvnCommandBufferBindTextures`, `BindSeparateTextures`, `BindSeparateSamplers` and `BindImages`, and took the sampler ID as the handle shifted right by 20. EA SPORTS FC 27 binds separate textures with bit 32 set (`0x1000001d1`, texture 0x1d1): a shader that takes its sampler from that combined word got ID 4096, where the GPU reads sampler 0. The single `nvnCommandBufferBindTexture` record already read its handle as 32 bits.
-- **Fix:** `bind_handles` (`hle_nvn.c`) keeps the low 32 bits of each handle before it moves the IDs to the part of the host's table of the pool the command buffer bound (which may then pass 12 bits).
+- **Fix:** `bind_handles` (`hle_nvn.c`) keeps the low 32 bits of each handle. Host-table IDs are resolved only against [the execution pools](shaders.md#descriptor-handles-use-the-execution-pools) when read (a host sampler ID may then pass 12 bits).
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), at the title and in the menus.
 
 ### Version and capability checks that fail quietly
