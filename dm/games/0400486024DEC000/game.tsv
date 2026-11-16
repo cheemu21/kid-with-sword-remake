@@ -25,9 +25,16 @@ zip_store	.zs:.bwav:.webm:.metallib
 # ---- Memory ----
 # The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure). The NPDM declares 48 MB of system resource, so virtual address memory is on.
 # nninitStartup asks SetHeapSize 0x18ce00000 (6.2 GB) with the 9 GB pool, as Mario Kart World. 256 MB in front + 4 GB alias region + 256 MB stack region + 8 GB heap region: a starting split, to be measured
-mem_reserve	0x320000000
-mem_alias	0x100000000
-mem_map_limit	on
+# kid-with-sword-remake L6.1: an 8 GB alias region on the iPhone (the Mac takes 64 GB whatever the profile says, hle_svc.c). With 4 GB, play filled it to 3.75 GB (logs 40,
+# 42, 44: "alias region mapped up to +3.75 GB"), and the cutscene after the Master Sword stopped on its first picture, a white screen, on iPhones only (nxnative issue #2407);
+# the Mac, with its 64 GB, plays it. The block grows by the same 4 GB: 256 MB + 8 GB alias + 256 MB stack + 8 GB heap. It is address space: the 9 GB pool still bounds what is mapped
+mem_reserve	0x420000000
+mem_alias	0x200000000
+# kid-with-sword-remake L6.1: no application-pool check on the guest's maps. At the Master Sword (an iPhone log of the white screen, L-series before L3): the game holds its
+# 6.2 GB heap, asks MapPhysicalMemory for 38 MB more as the cutscene starts, and is refused ("2.73 GB mapped, the application pool is full"); the SDK frees cached pages and
+# retries, the cutscene's AV1 decoder never opens, and the fade-in stays white for good. Without the check the map is made (with the 8 GB alias region above to hold it); the
+# guest's memory is in files on the iPhone (DM_GUEST_FILE), so pages it maps and does not touch cost nothing
+mem_map_limit	off
 mem_stack	0x10000000
 app_pool	0x240000000
 sys_resource	0x3000000
