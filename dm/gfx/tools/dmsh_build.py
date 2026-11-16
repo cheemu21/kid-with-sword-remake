@@ -857,7 +857,10 @@ def decode_ubo_tex(name):
     slots, h = int(m.group(1)), int(m.group(2), 16)
     tb = slots & 0xffff; sb = (slots >> 16) - 1 if slots >> 16 else tb
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
-    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and not 3 <= sb <= 16): return None
+    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and not (3 <= sb <= 16 or sb == 2 and o1 * 4 >= SAMP_BASE)): return None
+    # Handle type 1 with its second word in the driver table c2: the texture's word in the game's uniform buffer, its separate sampler bound with BindSeparateSampler (Kirby Air Riders:
+    # fp_t2d_cb196615_10578000, the texture at c7 word 0 and the sampler at c2 0x578, separate sampler slot 2). The other half is then (SREG_C2, its c2 byte)
+    if ty == 1 and sb == 2: return (tb - 3, o0 * 4), (abi.SREG_C2, o1 * 4)
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def decode_ubo_img(name):
@@ -950,7 +953,8 @@ def reflect(key, stage, msl, res):
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
             other = () if us[0] == 'id' or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
-            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
+            if nm.endswith('Smplr') and us[0] == abi.SREG_C2: e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=us[0])   # the uniform word, the c2 sampler word ORed in
+            elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
         elif decode_ubo_img(nm):
@@ -981,6 +985,7 @@ def reflect(key, stage, msl, res):
             off = b['cb_offset'] * 4 if b and b['cb_slot'] == 0 else None
             if b and b['cb_slot'] == abi.GMEM_MAP_CB_SLOT:   # not a game buffer: for addresses traced to no storage buffer, the host's pool table (offset 0) or the write log (DMSH_GMEM_LOG_CB_OFFSET)
                 if b['cb_offset'] == abi.GMEM_LOG_CB_OFFSET: e.update(kind=abi.KIND_GMEM_LOG, rw=True); continue
+                if b['cb_offset'] == abi.GPTR_CB_OFFSET: e.update(kind=abi.KIND_GPTR, rw=False, sites=gptr_sites(stage, res)); continue
                 # rw: one of those accesses writes (the translator notes each one with its operation: Load, Store or an atomic)
                 e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
@@ -998,6 +1003,23 @@ def raw_log_opt(key, stage, src, res):
         if b['kind'] == abi.KIND_GMEM_LOG:
             return dmsh_atomic.raw_log_or(src, b['msl_name'])
     return src
+
+_GPTR_SITE = re.compile(r'translator: gptr site (\d+): c(\d+)\[(\d+)\] \+(\d+)$')
+
+def gptr_sites(stage, res):
+    """The shader's bind-time pointer sites (dmsh_abi.h DMSH_GPTR_*, PR #1585), in site order: [NVN storage buffer slot, byte offset of the pointer word]. A site whose storage buffer
+    the host does not take by slot (its address in no c0 storage buffer row) gets slot -1: the host leaves its entry empty and the shader searches the table"""
+    sites = {}
+    base = SSBO.get(stage)
+    for n in res.get('notes', ()):
+        m = _GPTR_SITE.match(n)
+        if not m: continue
+        k, cb_slot, cb_word, byte = map(int, m.groups())
+        off = cb_word * 4
+        reg = (off - base) // abi.C0_ROW if cb_slot == 0 and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else -1
+        sites[k] = [reg, byte]
+    if sorted(sites) != list(range(len(sites))) or len(sites) > abi.GPTR_MAX: raise ValueError(f'gptr sites {sorted(sites)} are not 0..n-1 within {abi.GPTR_MAX}')
+    return [sites[k] for k in range(len(sites))]
 
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer
@@ -1082,6 +1104,25 @@ def load_pairs(game, package):
     return pairs
 
 PAIRS = load_pairs(GAME, dm_dir)
+def load_mesh_pairs(package, pairs):
+    """The split's mesh / pixel pairs (<package dir>/mesh_pairs.tsv, shader_split.py var_pairs) into pairs: the mesh shader's padding reads its pixel shaders' MSL as vs_pad does, so it is
+    keyed by them and built after them. Not a profile table: the host's pipeline prebuild reads the profile's pair tables as vertex / pixel pairs"""
+    path = os.path.join(package, 'mesh_pairs.tsv')
+    if os.path.isfile(path):
+        with open(path) as f:
+            for ln in f:
+                if ln.strip() and not ln.startswith('#'): m, p = ln.split(); pairs[m].add(p)
+    return pairs
+load_mesh_pairs(dm_dir, PAIRS)
+
+def pixel_reads(key):
+    """The generic attributes (user(locnN)) the pixel shaders paired with key read, from their MSL; pairs whose MSL cannot be read are skipped"""
+    want = set()
+    for ps in PAIRS.get(key, ()):
+        fn = os.path.join(out, ps + '_b.metal')
+        if os.path.exists(fn):
+            with open(fn) as f: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', f.read())}
+    return want
 
 def build_keys(want, locations, pairs):
     """A partial vertex build needs its available paired pixel shaders before padding; a full build keeps every shader."""
@@ -1092,11 +1133,7 @@ def vs_pad(key, src):
     Maxwell attributes are untyped 32-bit slots, and a pixel shader reading a location the vertex shader did not write only gets a default; Ryujinx also fills them with (0,0,0,1) when it links stages. Here every shader is translated
     offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
-    want = set()
-    for ps in PAIRS.get(key, ()):
-        fn = os.path.join(out, ps + '_b.metal')
-        if os.path.exists(fn):
-            with open(fn) as f: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', f.read())}
+    want = pixel_reads(key)
     miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
     if not miss or i < 0 or j < 0 or k < 0: return src, []
@@ -1477,14 +1514,15 @@ def finish(key, w, j, c1):
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
-        try: src = dmsh_meshstage.to_stage(src, mesh); open(msl, 'w').write(src)
+        reads = pixel_reads(key) if PAIRS.get(key) else ()   # outputs its pixel shaders read but it does not write get (0,0,0,1) (dmsh_meshstage.pad)
+        try: src = dmsh_meshstage.to_stage(src, mesh, reads); open(msl, 'w').write(src)
         except ValueError as e: return 'mesh stage failed', str(e)[:160], None
     elif j['stage'] == 'cs':
         src, first = first_store(src, j.get('local')); open(msl, 'w').write(src)   # the first invocation's store, for the host (see first_store)
         try: src, spill = tg_spill(src)   # shared memory past Metal's 32 KB in a device buffer (see tg_spill)
         except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
         if spill: open(msl, 'w').write(src)
-    pad = []
+    pad = dmsh_meshstage.pad(mesh, reads) if mesh else []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer); the base instance from Metal (see vs_base_instance)
         src = vs_base_instance(vs_layer(vs_init(src))); open(msl, 'w').write(src)
     if j['stage'] == 'vs' and PAIRS.get(key):   # outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
@@ -1522,7 +1560,8 @@ def finish(key, w, j, c1):
     try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': mesh['kind'] if mesh else j['stage'],
-            **({'mesh_stage': {'kind': mesh['kind'], 'threads': mesh['threads'], 'payload': mesh['payload'], 'task': mesh.get('task', True)}, **({'entry_z': 'main0_z'} if mesh['kind'] == 'ms' else {})} if mesh else {}),
+            **({'mesh_stage': {'kind': mesh['kind'], 'threads': mesh['threads'], 'payload': mesh['payload'], 'task': mesh.get('task', True)}, **({'entry_z': 'main0_z'} if mesh['kind'] == 'ms' else {}),
+               **({'entry_object': 'main0_o'} if mesh['kind'] == 'ms' and not mesh.get('task', True) else {})} if mesh else {}),
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),

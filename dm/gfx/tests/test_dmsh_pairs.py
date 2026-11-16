@@ -22,7 +22,7 @@ import pso_offline
 
 def builder():
     # Use production functions without the CLI's translator/profile initialization.
-    names = {'load_pairs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed'}
+    names = {'load_pairs', 'load_mesh_pairs', 'pixel_reads', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed'}
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
     ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib)
     exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names],
@@ -96,6 +96,13 @@ class Pairing(unittest.TestCase):
         self.g.table('pso_pairs.tsv').unlink(); self.extra.unlink()
         self.assertEqual(self.ns['load_pairs'](self.g, self.package), {'v': {'f0'}})
         self.assertEqual(self.ns['vs_pad']('unpaired', VS), (VS, []))
+
+    def test_mesh_pairs_from_the_package(self):   # the split's mesh_pairs.tsv beside the packages, not a profile table: the pipeline prebuild reads those as vertex pairs
+        (self.package / 'mesh_pairs.tsv').write_text('# mesh\nm\tf6\nm\tf1\n')
+        pairs = self.ns['load_mesh_pairs'](str(self.package), self.ns['PAIRS'])
+        self.assertEqual(pairs['m'], {'f1', 'f6'}); self.assertEqual(pairs['v'], {'f0', 'f1', 'f6'})
+        self.assertEqual(self.ns['pixel_reads']('m'), {0, 1, 6})
+        self.assertEqual(self.ns['load_mesh_pairs'](str(self.root / 'none'), {}), {})
 
     def test_profile_input_stamp_changes(self):
         missing = dmsh_chain.inputs(self.g)

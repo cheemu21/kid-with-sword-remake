@@ -162,5 +162,36 @@ class Vote(Alu):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
 
 
+class CullSetp(Alu):
+    """0x80d, beside ISETP, in no table at hand: Kirby Air Riders' every vertex shader reduces its position's bound tests (FSETPs into P0..P6) with two of them and exits on P0 ahead of
+    its outputs, an early-out for a culled vertex. The translator writes both destinations false, so the exit is never taken (the clip volume removes what it would have skipped)"""
+    CULL0 = (0x000fc80003fe0000, 0xc43211110000780d)   # the game's first: immediate 0xc4321111, destinations PT, PT
+    CULL1 = (0x000fda0003f06000, 0x800000000000780d)   # the game's second: immediate 0x80000000, compare 6, destination P0
+    FSETP = Vote.FSETP                                 # P0 from R19 and R20
+    MOV_P0 = Vote.MOV_P0                               # @P0 MOV R6, R19
+
+    def test_translates_and_clears_the_predicate(self):
+        msl = self.kept(self.FSETP, self.CULL0, self.CULL1, self.MOV_P0, srcs=(6, 19, 20))
+        self.assertIn('if (false)', msl)   # the FSETP's P0 is overwritten false: the guarded MOV never runs
+        self.assertNotRegex(msl, r'[<>]=? *as_type<float>')   # and its comparison is gone
+
+    def test_another_form_is_refused(self):
+        with self.assertRaises(Exception):
+            self.kept((self.CULL1[0] | 1 << 8, self.CULL1[1]), srcs=(6,))   # bit 72 set: not the form met
+
+
+class DeadChannel(Translated):
+    """An image read whose .x is dead and whose .y is used: the optimizer's RemoveNode followed the read as if it were removed, so the chain computing its coordinate lost its last use and went, and the
+    shader read an uninitialized variable (Ocarina of Time's wind solver 04942f42cae10d0f, the encodings below are from it: its velocity field oscillated and the grass flickered at 10 Hz)"""
+    Y_MINUS_1 = (0x000fe40007ffe0ff, 0xffffffff01077810)   # IADD R7, R1, -1
+    SULD = (0x000f6200001e0300, 0x6000080006047b97)        # SULD.XY R4, [R6, R7]: R5 is .y
+    STORE_Y = (STORE[0], 0x0000080509008388)               # STS.U32 [R9 * 16 + 8], R5
+
+    def test_coordinate_survives(self):
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(1), s2r_tid(6), s2r_tid(9), self.Y_MINUS_1, self.SULD, self.STORE_Y)) + inst(*EXIT), shared=0x1000)
+        self.assertRegex(msl, r'\+ \(-1\)|- 1\b')
+        self.assertNotRegex(msl, r'(?m)^\s+int (_\d+);\n\s+int _\d+ = \1;')
+
+
 if __name__ == '__main__':
     unittest.main()

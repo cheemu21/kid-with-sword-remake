@@ -24,7 +24,7 @@ int main(void) { @autoreleasepool {
     assert(a && a->args && b && b->args && guest[0] == 0);
     id<MTLBuffer> converted = g_cur_arena->buf;
     size_t ao = (size_t)(a->args - converted.gpuAddress), bo = (size_t)(b->args - converted.gpuAddress);
-    assert(ao + 20 <= converted.length && bo + 20 <= converted.length);
+    assert(ao + 32 <= converted.length && bo + 32 <= converted.length);
     // A deferred write to a third argument must be landed before snapshotting
     // the conversion epoch, so the GPU result is still found by the draw.
     const p_draw draw_queued = {.prim=DM_PRIM_MESH_TASKS, .ind=(uintptr_t)(guest + 4)};
@@ -33,9 +33,11 @@ int main(void) { @autoreleasepool {
     const ixc_ent *queued = ixc_find(&draw_queued, NULL);
     assert(queued && queued->args && !g_nubd);
     size_t qo = (size_t)(queued->args - converted.gpuAddress);
-    assert(qo + 20 <= converted.length);
+    assert(qo + 32 <= converted.length);
     mtl_sub_commit(); mtl_drain();
-    const uint32_t expected_3[] = {3, 1, 1, 0, 17}, expected_0[] = {0, 1, 1, 0, 23};
+    // {count, 1, 1} for a task shader's grid; {count, first} at +12 for the task or object function (DMSH_MESH_DRAW_SLOT); at +20 the object grid of a mesh shader with no task,
+    // ceil(count / DMSH_MESH_GRID) blocks (nvn_geometry.inc mtk_encode)
+    const uint32_t expected_3[] = {3, 1, 1, 3, 17, 1, 1, 1}, expected_0[] = {0, 1, 1, 0, 23, 0, 1, 1};
     assert(!memcmp((const uint8_t *)converted.contents + ao, expected_3, sizeof expected_3));
     assert(!memcmp((const uint8_t *)converted.contents + bo, expected_0, sizeof expected_0));
     assert(!memcmp((const uint8_t *)converted.contents + qo, expected_3, sizeof expected_3));

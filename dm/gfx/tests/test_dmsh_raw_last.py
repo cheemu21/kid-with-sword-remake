@@ -25,7 +25,8 @@ exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.Assign) 
 MAC_METAL = scope['MAC_METAL']
 
 LDG = (0x000ea200081e890f, 0x0000000405067981)   # LDG.E R6, [R5.64 + UR4]: R5 the thread index, an address the translator traces to no storage buffer
-HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+((?:, thread uint& _\d+)+)\)\n\{\n')
+HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, (?:thread const int& _\d+, )?const device (_\d+)& \w+(?:, const device _\d+& \w+)?((?:, thread uint& _\d+)+)\)\n\{\n')
+SITE = 'thread const int& _'   # a load's bind-time pointer site and its entries' buffer, after the address (PR #1585)
 CACHE_WORDS = 7   # the kept entry, its start, end and delta (GlobalToStorage.TryGenerateRawStorageOp)
 
 # The pool table as the host writes it (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): 8,192 entries of 8 words {start lo, start hi, end lo, end hi, delta lo, delta hi, hint chunk, hint entry}, sorted by start,
@@ -83,7 +84,7 @@ class RawLast(Translated):
         main = msl[msl.index('kernel void main0'):]
         words = re.findall(r'(?m)^    uint (_\d+) = 0u;$', main)
         self.assertEqual(len(words), CACHE_WORDS, main[:900])
-        calls = [c.split(', ')[3:] for c in re.findall(name + r'\(([^;]*)\);', main)]
+        calls = [c.split(', ')[-CACHE_WORDS:] for c in re.findall(name + r'\(([^;]*)\);', main)]
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0], calls[1])   # both loads share the words
         self.assertEqual(sorted(calls[0]), sorted(words))
@@ -97,8 +98,8 @@ class RawLast(Translated):
         m = HELPER.search(msl)
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
-                  '{\n    uint c[%d] = {};\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n' % CACHE_WORDS +
-                  f'        out[id * 16 + s] = {m.group(1)}(lo, hi, map, ' + ', '.join(f'c[{k}]' for k in range(CACHE_WORDS)) + ');\n    }\n}\n')
+                  '{\n    uint c[%d] = {};\n    int site = -1;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n' % CACHE_WORDS +
+                  f'        out[id * 16 + s] = {m.group(1)}(lo, hi, ' + ('site, map, map, ' if m.group(0).count('thread const int&') == 3 else 'map, ') + ', '.join(f'c[{k}]' for k in range(CACHE_WORDS)) + ');\n    }\n}\n')
         with tempfile.TemporaryDirectory() as w:
             w = Path(w)
             (w / 'k.metal').write_text(kernel)
@@ -113,7 +114,7 @@ class RawLast(Translated):
 
 LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
 def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
-VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+((?:, thread uint& _\d+)+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')   # the range cache's words (CACHE_WORDS, oot2 6951110c), then the three words after the first
+VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, (?:thread const int& _\d+, )?const device (_\d+)& \w+(?:, const device _\d+& \w+)?((?:, thread uint& _\d+)+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')   # the range cache's words (CACHE_WORDS, oot2 6951110c), then the three words after the first
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -144,8 +145,8 @@ class RawVector(Translated):
         # each step's word 0 when words 1..3 are the next three of its pool (value() counts words), 0 where it reads no pool; the runner's addresses keep all four in one pool
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
-                  '{\n    uint c[%d] = {};\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n' % CACHE_WORDS +
-                  f'        int w = {m.group(1)}(lo, hi, map, ' + ', '.join(f'c[{k}]' for k in range(CACHE_WORDS)) + ', vec);\n'
+                  '{\n    uint c[%d] = {};\n    int site = -1;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n' % CACHE_WORDS +
+                  f'        int w = {m.group(1)}(lo, hi, ' + ('site, map, map, ' if m.group(0).count('thread const int&') == 3 else 'map, ') + ', '.join(f'c[{k}]' for k in range(CACHE_WORDS)) + ', vec);\n'
                   '        out[id * 16 + s] = w == 0 || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
         with tempfile.TemporaryDirectory() as w:
             w = Path(w)
@@ -157,6 +158,41 @@ class RawVector(Translated):
             subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
+
+# RUNNER with pool B out of the table (its entry an empty range, as a pool the host lists no address for) and reachable only through bind-time pointer site 0's entry at buffer 3
+# (DMSH_KIND_GPTR, entries laid out as the table's), as Ocarina of Time's culling shaders read a range through a pointer into such a pool (PR #1585)
+SITE_RUNNER = RUNNER.replace('ent[0] = s; ent[1] = end; ent[2] = delta;', 'ent[0] = s; ent[1] = p == 1 ? s : end; ent[2] = delta; if (p == 1) { uint64_t *g = gp.contents; g[0] = s; g[1] = end; g[2] = delta; }') \
+    .replace('id<MTLBuffer> pool[POOLS], map', 'id<MTLBuffer> gp = [d newBufferWithLength:64 * 32 options:MTLResourceStorageModeShared]; memset(gp.contents, 0, 64 * 32);\n    id<MTLBuffer> pool[POOLS], map') \
+    .replace('[ce setBuffer:out offset:0 atIndex:2];', '[ce setBuffer:out offset:0 atIndex:2]; [ce setBuffer:gp offset:0 atIndex:3];')
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class RawSite(Translated):
+    """A raw load's bind-time pointer site (GlobalToStorage.FindPointerSite, PR #1585): after the kept entry misses, the helper tries the site's entry before the hint and the search,
+    so a pool the table leaves out is still read; with no site (-1) the same reads find no pool"""
+    @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
+    def test_site_reaches_a_pool_out_of_the_table(self):
+        for part in ('g[0] = s;', 'id<MTLBuffer> gp = ', 'atIndex:3];'): self.assertIn(part, SITE_RUNNER)   # the runner is RUNNER with its three replacements applied
+        msl = RawLast.msl(self)
+        m = HELPER.search(msl)
+        self.assertTrue(m and m.group(0).count('thread const int&') == 3, msl[:3000])   # the load helper takes a site
+        out = {}
+        for site in (0, -1):
+            kernel = (msl[:msl.index('kernel void main0')] +
+                      f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], const device {m.group(2)}& gp [[buffer(3)]], uint id [[thread_position_in_grid]])\n'
+                      '{\n    uint c[%d] = {};\n    int site = %d;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n' % (CACHE_WORDS, site) +
+                      f'        out[id * 16 + s] = {m.group(1)}(lo, hi, site, map, gp, ' + ', '.join(f'c[{k}]' for k in range(CACHE_WORDS)) + ');\n    }\n}\n')
+            with tempfile.TemporaryDirectory() as w:
+                w = Path(w)
+                (w / 'k.metal').write_text(kernel)
+                r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+                (w / 'r.m').write_text(SITE_RUNNER)
+                subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+                out[site] = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True).stdout
+        self.assertIn('bad 0 of 1024', out[0], out[0])
+        self.assertNotIn('bad 0 of 1024', out[-1], out[-1])   # pool B's reads find no entry without the site
 
 
 if __name__ == '__main__':

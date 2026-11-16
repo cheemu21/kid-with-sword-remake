@@ -74,6 +74,36 @@ int main(void) {
         CHECK("storage of zeros is not taken", !tex_cpu_content(&f.t));
         teardown(&f);
 
+        {   // GPU-written spans (gws_span): storage the CPU rewrote after the GPU wrote it is the CPU's again, and a sliver of a neighbour's span does not decide (Ocarina of Time's terrain tiles)
+            uintptr_t pg = (uintptr_t)getpagesize();
+            #define TEX_AT(name, ser, off, h) tex_t name = f.t; name.serial = (ser); name.mem = (uint8_t *)f.mem + (off); name.d.width = 64; name.d.height = (h); nvn_tex_layout(&name.d, &name.L)
+            setup(&f, 7020, CACHED, NVN_FORMAT_RGBA8, 0); nvn_dirty_add_range(f.mem, POOL);   // pages the tracker protects, as the host's pools
+            TEX_AT(tile, 7021, 0, 128);   // 32 KB: whole pages
+            CHECK("fixture: the tile holds whole pages", tile.L.size >= 2 * pg);
+            mtl_tex_gpu_written(&tile);
+            CHECK("storage the GPU wrote is the GPU's", gws_owned((uintptr_t)tile.mem, (uintptr_t)tile.mem + tile.L.size));
+            dm_guest_write_prepare(tile.mem, tile.L.size); memset(tile.mem, 0x5a, tile.L.size);   // the slot handed to a new tile the CPU fills
+            CHECK("storage the CPU rewrote since is not the GPU's", !gws_owned((uintptr_t)tile.mem, (uintptr_t)tile.mem + tile.L.size));
+            CHECK("and a new texture over it is taken from its storage", tex_cpu_content(&tile));
+            mtl_tex_gpu_written(&tile);
+            CHECK("a GPU write there again makes it the GPU's", gws_owned((uintptr_t)tile.mem, (uintptr_t)tile.mem + tile.L.size));
+            mtl_tex_release(&tile); nvn_dirty_remove_range(f.mem);
+            teardown(&f);
+
+            setup(&f, 7022, CACHED, NVN_FORMAT_RGBA8, 0);
+            TEX_AT(drawn, 7023, 0, 64);    // 16 KB, one page
+            TEX_AT(filled, 7024, pg, 128);   // the next two pages
+            drawn.L.size += 1536;          // its laid-out size reaches 1,536 bytes into the next texture, as a 260x260 RG8 normal map's does
+            mtl_tex_gpu_written(&drawn);
+            memset(filled.mem, 0x5a, filled.L.size);
+            CHECK("a neighbour's span reaching less than a page into a texture does not make it the GPU's", !gws_owned((uintptr_t)filled.mem, (uintptr_t)filled.mem + filled.L.size));
+            CHECK("and it is taken from its storage", tex_cpu_content(&filled));
+            CHECK("while the drawn texture stays the GPU's", gws_owned((uintptr_t)drawn.mem, (uintptr_t)drawn.mem + drawn.L.size));
+            mtl_tex_release(&filled); mtl_tex_release(&drawn);
+            teardown(&f);
+            #undef TEX_AT
+        }
+
         static const struct { const char *label; int format; uint32_t flags; } left_out[] = {
             {"a display texture stays a GPU texture", NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_DISPLAY},
             {"a video-decode texture stays a GPU texture", NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_VIDEO_DECODE},

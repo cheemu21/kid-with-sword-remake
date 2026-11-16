@@ -535,3 +535,10 @@ check_t_tex_recycle: t_tex_recycle
 	DM_NVN_TEX_RECYCLE=1 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_tex_recycle
 	MTL_DEBUG_LAYER=1 ./t_tex_recycle off
 
+
+t_mesh_first_use: t_mesh_first_use.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_first_use.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_mesh_first_use
+check_t_mesh_first_use: t_mesh_first_use
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mesh_first_use

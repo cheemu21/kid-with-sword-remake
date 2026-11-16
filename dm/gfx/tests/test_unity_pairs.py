@@ -90,6 +90,11 @@ class UnityPassPairsTests(unittest.TestCase):
         self.assertEqual(pairs, set())
         self.assertEqual(split.var_pairs(found), {(key(vertex), key(fragment))})
 
+    def test_mesh_variation_pairs_tagged(self):   # an NVN2 variation with a mesh shader: its pixel shader pairs with the mesh, tagged for the package's mesh_pairs.tsv
+        found = [('/f.bfsha#BNSH@0x10#var1', st, st, b'') for st in ('ts', 'ms', 'ps')]
+        with mock.patch.object(split, 'skey', lambda ctl, code: ctl):
+            self.assertEqual(split.var_pairs(found), {('ms', 'ps', 'mesh')})
+
     def test_scanner_routes_legacy_cover_to_supplemental_table(self):
         vertex, fragment = shader('vs'), shader('ps', (1,))
         pair = key(vertex), key(fragment)

@@ -103,6 +103,34 @@ static void finalized_upload(int write_after_record) {
     CHECK(!tex_cpu_written(serial), "pool finalization drops retired CPU classification");
     defer_drain(); munmap(mem,len);
 }
+// Texture objects over the same storage and description share one packaged texture (g_pkg_share): one upload, one Metal texture, and a pool's finalization drops the entry
+static void shared_storage_upload(void) {
+    const size_t len = 262144;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "shared storage: pool initialized");
+    NVNtextureBuilder tb; NVNtexture a = {0}, b = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&a, &tb) && h_nvnTextureInitialize(&b, &tb), "shared storage: two texture objects over one storage");
+    uint8_t pixels[64]; for (int i = 0; i < 64; i++) pixels[i] = (uint8_t)(i * 3 + 1);
+    NVNcopyRegion region = {0,0,0,4,4,1};
+    h_nvnTextureWriteTexels(&a, NULL, &region, pixels); h_nvnTextureWriteTexels(&b, NULL, &region, pixels);
+    mtl_reg_tex(1, (const tex_t *)&a, NULL); mtl_reg_tex(2, (const tex_t *)&b, NULL);
+    uint64_t up = g_pkg_uploads;
+    mtl_sub_begin();
+    id<MTLTexture> ta = tex_by_id(1), tb2 = tex_by_id(2);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "shared storage: uploads completed");
+    CHECK(ta && tb2 && (ta == tb2 || ta.parentTexture == tb2 || tb2.parentTexture == ta || (ta.parentTexture && ta.parentTexture == tb2.parentTexture)), "shared storage: both IDs read one Metal texture");
+    CHECK(g_pkg_uploads == up + 1, "shared storage: one upload for both serials");
+    mtl_reg_tex(1, NULL, NULL); mtl_reg_tex(2, NULL, NULL);
+    h_nvnTextureFinalize(&a); h_nvnTextureFinalize(&b);
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
+    alias_key k = tex_alias_key((const tex_t *)&a); pthread_mutex_lock(&g_smu); int left = hm_get_id(&g_pkg_share, &k) != nil; pthread_mutex_unlock(&g_smu);
+    CHECK(!left, "shared storage: the pool's finalization drops its sharing entries");
+    defer_drain(); munmap(mem, len);
+}
 static void finalized_bindless_pool(void) {
     enum { N = NGHOST + 16, FIRST = 256, STRIDE = 4096 };
     const size_t len = N * STRIDE;
@@ -206,6 +234,22 @@ static void finalize_during_walk(void) {
     mtl_reg_tex(1,NULL,NULL); h_nvnTextureFinalize(&tex);
     defer_drain(); munmap(mem,len);
 }
+// The kinds and levels of the GPU's writes are kept per texture (tex_gpu_wrote_lv) and decide its ownership (mtl_tex_gpu_owned): never written, the CPU's; written, the GPU's
+static void gpu_written_levels(void) {
+    tex_t t = {.serial=nvn_new_serial()}; t.d.width = t.d.height = 64; t.d.depth = 1; t.d.levels = 4; t.d.format = 0x25; mtl_tex_init(&t);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:YES];
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; d.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; CHECK(mt != nil, "render-target texture made"); if (!mt) return;
+    tex_put(t.serial, mt);
+    CHECK(!mtl_tex_gpu_owned(t.serial) && !mtl_tex_gpu_levels(t.serial), "never written: the CPU's");
+    tex_gpu_wrote_lv(&t, GW_ATTACH, 1); tex_gpu_wrote_lv(&t, GW_ATTACH, 3);
+    CHECK(mtl_tex_gpu_writes(t.serial) == GW_ATTACH && mtl_tex_gpu_levels(t.serial) == 0xa && mtl_tex_gpu_owned(t.serial), "the kinds and the levels written are kept apart; written, the GPU's");
+    tex_t u = {.serial=nvn_new_serial()}; u.d = t.d; mtl_tex_init(&u); tex_put(u.serial, mt);
+    tex_gpu_wrote(&u, GW_IMAGE);
+    CHECK(mtl_tex_gpu_writes(u.serial) == GW_IMAGE && (mtl_tex_gpu_levels(u.serial) & 0xf) == 0xf, "a write of levels not known counts for every level");
+    mtl_tex_release(&t); mtl_tex_release(&u);
+    CHECK(!mtl_tex_gpu_writes(t.serial) && !mtl_tex_gpu_levels(u.serial), "released: nothing kept");
+}
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
@@ -230,7 +274,16 @@ int main(int argc, const char **argv) { @autoreleasepool {
     tex_t z = {0}; mtl_tex_cpu_written(&z);
     CHECK(mtl_cpu_tex_count() == N - 2, "a texture with no serial is not recorded");
     for (int i=0;i<N;i++) mtl_tex_release(&t[i]);
+    // NVNtexture is plain data: finalizing a copy ends the copy. The texture stays live while the object it was initialized in holds it; if that object no longer does, the copy was the last one
+    static tex_t own, cpy, moved;
+    own.magic = MAGIC('T', 'E', 'X', 0); own.serial = 900001; own.d = t[0].d; mtl_tex_init(&own); mtl_tex_cpu_written(&own);
+    cpy = own; mtl_tex_release(&cpy);
+    CHECK(tex_cpu_written(own.serial) == 1, "finalizing a copy leaves the texture live");
+    mtl_tex_release(&own);
+    CHECK(!nvn_hm_get(&g_tex_live, &own.serial), "finalizing the object itself ends it");
+    own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
+    CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalized_bindless_pool(); ptb_recycle(); finalize_during_walk(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); shared_storage_upload(); finalized_bindless_pool(); ptb_recycle(); finalize_during_walk(); gpu_written_levels(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

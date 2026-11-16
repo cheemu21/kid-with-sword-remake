@@ -41,6 +41,8 @@ int main(void) {
     int (*device_state)(const NfpDeviceHandle *) = forced(&hle_force_h_nfp_State, "_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE");
     Result (*tag_info)(void *, const NfpDeviceHandle *) = forced(&hle_force_h_nfp_TagInfo, "_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE");
     int (*nfp_lib)(void) = forced(&hle_force_h_nfp_LibState, "_ZN2nn3nfp8GetStateEv");
+    void (*nfp_init_ext)(void) = forced(&hle_force_h_nfp_InitExt, "_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv");
+    Result (*ext_info)(void *, const NfpDeviceHandle *) = forced(&hle_force_h_nfp_ExtAreaInfo, "_ZN2nn3nfp30GetExtendedApplicationAreaInfoEPNS0_27ExtendedApplicationAreaInfoERKNS0_12DeviceHandleE");
     if (fails) return 1;
     // The amiibo library's own state: Breath of the Wild and Tears of the Kingdom initialize it and attach their availability event only when it is not 1 (#613).
     CHECK(nfp_lib() == 0, "NFP begins uninitialized");
@@ -76,6 +78,11 @@ int main(void) {
     CHECK(state() == 0, "NFP finalization leaves NFC finalized");
     nfp_init();
     CHECK(nfp_lib() == 1, "NFP initializes again after finalization");
+    nfp_fini();
+    // SDK 20's initialization with the extended application area is the same console (Kirby Air Riders)
+    nfp_init_ext();
+    CHECK(nfp_lib() == 1, "NFP initializes with the extended application area");
+    { NfpDeviceHandle h = {NFP_DEVICE_ID, {0}}; char info[64]; CHECK(ext_info(info, &h) == NFP_RES_TAG_NOT_FOUND, "the extended application area needs a tag"); }
     nfp_fini();
     CHECK(lookups == 0, "NFC and NFP hooks do not call an original SDK service path");
     printf("NFC availability: %d checks, %d failed\n", checks, fails);

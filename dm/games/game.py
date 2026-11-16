@@ -217,6 +217,8 @@ def header_one(g):
     if gmb not in ('on', 'off'): sys.exit(f'{g.id}: gmem_nobig must be on or off: {gmb}')
     rtl = g.get('rt_lossy', 'off')   # colour render targets the GPU writes only as attachments made with Metal's lossy compression (about half the memory and bandwidth; nvn_mtl.m rt_lossy): on / off
     if rtl not in ('on', 'off'): sys.exit(f'{g.id}: rt_lossy must be on or off: {rtl}')
+    dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
+    if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
     upc = g.get('upscaler_chain', '')   # <stage>,<stage>...><last>: an upscaler that is a chain of shaders (16-digit keys); with DM_UPSCALER=metalfx the stages before the last are skipped and MetalFX scales the first stage's input into the last's image (nvn_mtl.m up_chain)
     if upc and not re.fullmatch(r'[0-9a-f]{16}(,[0-9a-f]{16})*>[0-9a-f]{16}(\|[0-9a-f]{16})*', upc): sys.exit(f'{g.id}: upscaler_chain takes <key>,<key>...><key>[|<key>...] (the last stage, or any of several): {upc}')
     fcp = g.get('fps_cap_present', 'off')   # fps_target / the player's frame rate held by presentation alone (hle_nvn.c fps_present_cap), for a game whose logic follows real time: on / off
@@ -320,6 +322,7 @@ def header_one(g):
          f'#define DM_GAME_RT_ALIAS {int(rta == "on")}',
          f'#define DM_GAME_RT_DROP {int(rtd == "on")}',
          f'#define DM_GAME_FPS_CAP_PRESENT {int(fcp == "on")}',
+         f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_UPSCALER_CHAIN "{upc}"',
          f'#define DM_GAME_RT_LOSSY {int(rtl == "on")}',
          f'#define DM_GAME_POOL_SKIP_RETIRED {int(psr == "on")}',

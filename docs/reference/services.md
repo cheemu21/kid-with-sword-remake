@@ -357,6 +357,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_sdk16.c` keeps the library state as on Horizon: 0 until `Initialize`, 1 until `Finalize`, like the `nfc` hooks beside it. `dm/host/tests/t_nfc.c` checks it.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) 1.4.3 (GitHub issue #613; when the poll first runs was not found; the abort came after about 15 minutes of play, and was not reproduced here).
 
+
+### SDK 20's amiibo library with the extended application area
+
+- **Symptom:** `[RED] sf: the game connects to service nfp:user itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` at `sdk+0x501e98`, a second after the title's first frames.
+- **Cause:** the game initializes the amiibo library with `nn::nfp::InitializeWithExtendedApplicationArea`, which the host did not take over, so the SDK's own code connected to `nfp:user`. It also imports `GetExtendedApplicationArea`, `SetExtendedApplicationArea`, `GetExtendedApplicationAreaInfo` and `Restore`.
+- **Fix:** `hle_sdk16.c` answers them as the rest of the family ([SDK 20 six-axis sensor and amiibo (`nfp`) calls](#sdk-20-six-axis-sensor-and-amiibo-nfp-calls)): the initialization is `Initialize`'s, and the four others answer that no tag was found. `dm/host/tests/t_nfc.c` checks the initialization and the area info.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) (v458752, SDK 20.5.26).
 ### Vibration values flushed by the SDK's vibration graph
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::hid::VibrationNode::Update`.

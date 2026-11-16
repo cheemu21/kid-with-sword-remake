@@ -34,6 +34,11 @@ int main(void) { @autoreleasepool {
     NSString *plain = [app stringByAppendingPathComponent:@"applegpu_plain.mtl4x"]; [body writeToFile:plain atomically:NO];
     CHECK(!pso_bundle_unwrap(app, @"applegpu_plain"), "a file without the DMPA mark is refused");
     CHECK(![NSFileManager.defaultManager fileExistsAtPath:[docs stringByAppendingPathComponent:@"pso_bundle/applegpu_plain.mtl4a"]], "and leaves no archive behind");
+    // An app on another volume than its Documents (installed from Xcode): no clone, a copy with the magic restored
+    [marked replaceBytesInRange:NSMakeRange(8, 4) withBytes:"CPY!"]; usleep(20000); [marked writeToFile:src atomically:YES];
+    g_pso_clone_off = 1; NSString *fourth = pso_bundle_unwrap(app, @"applegpu_test"); NSData *c = bytes(fourth); g_pso_clone_off = 0;
+    CHECK(c.length == marked.length && !memcmp(c.bytes, magic, 4) && !memcmp((const uint8_t *)c.bytes + 4, (const uint8_t *)marked.bytes + 4, marked.length - 4), "without a clone (another volume) it is copied, its magic restored");
+    CHECK([bytes(src) isEqualToData:marked], "and the bundled file is left as it was");
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_unwrap: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

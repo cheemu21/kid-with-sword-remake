@@ -356,6 +356,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `hle_codec.c` keeps the manager in host state (its pointer in that first word) and decodes with the `sdk`'s software `OpusDecoder`: Enqueue queues the packet and takes an I/O buffer, Execute decodes every waiting packet on the caller's thread and signals the event, Dequeue hands back a frame and its buffer. So a request is never "executing". A packet the decoder refuses completes as 20 ms of silence, with a red line. `ResetHardwareOpusDecoder` and `FinalizeHardwareOpusDecoder` serve both interfaces.
 - **Found on:** Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`) (SDK 21.4.4: a mono manager of 128 decoders and 255 I/O buffers, a stereo one of 72 and 160, 48 kHz, 20 ms frames); [Star Fox](../../dm/games/0400E88025B1A000/README.md) (the same figures).
 
+
+### A plain hardware Opus decoder taken for a manager decoder
+
+- **Symptom:** a crash in the host, `CRASH sig=11 addr=0 pc=h_codec_HwOpusFini+0xcc`, when the game finalizes one of its Opus decoders (about a minute into the title screen).
+- **Cause:** `FinalizeHardwareOpusDecoder` and `ResetHardwareOpusDecoder` serve the plain C interface and SDK 21's manager ([above](#sdk-21s-hardware-opus-decoder-manager)), whose host states share the object map. They told a manager decoder by a non-zero word at +0x10 of its state, but a plain decoder's state is the SDK's own `OpusDecoderType`, which the SDK fills: with a non-zero word there, a plain decoder was finalized as a manager decoder and its first word followed as the manager.
+- **Fix:** `hle_codec.c` starts every host state it keeps for a game decoder with a kind the host writes (a plain decoder's software state follows it), and the shared calls go by it. `dm/host/tests/t_opus_kind.c` checks both kinds; the old code crashes in it.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) (v458752, SDK 20.5.26: only the plain single- and multi-stream C interfaces).
 ## Timing and catch-up
 
 ### At least one rendered frame between two updates

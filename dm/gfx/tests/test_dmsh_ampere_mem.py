@@ -53,8 +53,15 @@ class GuardedWrites(Translated):
         self.assertRegex(msl, r'bool \w+ = \w+ != 0;\s+float \w+ = \w+;\s+if \(\w+\)')   # the copy only where it held
 
     def test_uniform_handle_forms_translate(self):
-        for code in ((0x000f4200081e0f04, 0x3000040702067f63), (0x000142000c1e03ff, 0x2000040400167f6c), (0x00014200001e0f12, 0x3800001002101364)):   # TLD4 and TXD through a uniform register, TLD4 through a register
+        for code in ((0x000f4200081e0f04, 0x3000040702067f63), (0x000142000c1e03ff, 0x2000040400167f6c), (0x00014200001e0f12, 0x3800001002101364),
+                     (0x000f4400000002ff, 0x68000016101b736a)):   # TLD4 and TXD through a uniform register, TLD4 and TMML (Kirby Air Riders' encoding) through a register
             self.translate(inst(*code) + inst(*EXIT))
+
+    def test_lod_query_through_a_uniform_register(self):
+        # UR6 = c3[0x10]; TMML through UR6 (Kirby Air Riders' encoding, UR6 at 40..46, R11/R12 the coordinates, write barrier 2); after waiting, the result atomically added to an image, so it stays
+        ur6, tmml, used = (0x000fe20000000a00, 0x00c0040000067ab9), (0x000f4200080002ff, 0x600006ff0c0b7f69), (0x004ea200001ee000 | 0x3f << 52, 0x00000c0b030c7593)
+        msl = self.translate(inst(*ur6) + inst(*tmml) + inst(*used) + inst(*EXIT))
+        self.assertIn('calculate_', msl)   # the LOD query
 
     def test_gradients_through_a_uniform_register_keep_their_handle(self):
         # UR4 = c3[0x10]; TXD through UR4 (write barrier 5); after waiting on it, the result atomically added to an image, so it stays. The translator takes its source 0 as the handle: without it, it could not find one and deleted the read

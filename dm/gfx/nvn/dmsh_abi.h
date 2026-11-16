@@ -29,7 +29,8 @@
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
 #define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table: Mario Kart World's task shaders read c0 0x670 and 0x680, and the game binds their buffers at slots 0 and 1
 #define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table: its mesh shaders read c0 0x770, 0x780, 0x790 and 0x7b0, and it binds slots from 0
-#define DMSH_MESH_FIRST_SLOT 29          // a task or mesh function's buffer: the draw's first workgroup (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
+#define DMSH_MESH_DRAW_SLOT 29           // a task or object function's buffer: the draw's {count, first} workgroups, NVN's DrawMeshTasksIndirect record (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
+#define DMSH_MESH_GRID 1024              // Metal's limit of threadgroups in a mesh grid: a mesh shader with no task shader is drawn by an object function launching blocks of this many (dmsh_meshstage.py)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
@@ -61,6 +62,7 @@
 #define DMSH_KIND_SAMP_TEX "samp_tex"    // the sampler of the combined handle in texture slot reg
 #define DMSH_KIND_SAMP_ID "samp_id"      // a sampler ID that is a constant in the shader (reg = the ID)
 #define DMSH_KIND_TEX_UBO "tex_ubo"      // bindless: the texture handle is in uniform slot reg at byte off
+#define DMSH_SREG_C2 0xff               // tex_ubo / samp_ubo: sreg naming the driver table c2 (soff its byte) as the place of the other word of a handle type 1, not a uniform slot (Kirby Air Riders: the texture word in c7, its separate sampler at c2 0x578)
 #define DMSH_KIND_SAMP_UBO "samp_ubo"    // bindless: the sampler handle is in uniform slot reg at byte off
 #define DMSH_KIND_IMG_UBO "img_ubo"      // bindless: the image handle is in uniform slot reg at byte off
 #define DMSH_KIND_TBUF_UBO "tbuf_ubo"    // bindless: the handle of a buffer texture is in uniform slot reg at byte off
@@ -83,6 +85,13 @@
 // The write log is a bitmap of the entries in the exact pool table bound to the shader. Bit i in word i / 32 records a store or atomic through entry i.
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
+// Bind-time pointers (PR #1585): a raw load whose address is a pointer word the shader read from a bound storage buffer at a constant offset, plus an index, is a site
+// (GlobalToStorage.FindPointerSite). The translator numbers a shader's sites and notes each one ("gptr site k: c<cb slot>[<cb word>] +<byte>", dmsh_build.py gptr_sites), and the
+// host fills one entry per site before the draw from the word's current value (nvn_mtl.m, NVN_RB_GPTR in encode_args): the pool holding it as start, end (exclusive), delta, laid
+// out as a table entry. The shader tries its site's entry before the hint and the search, so an entry that is stale or empty costs only the search it replaces
+#define DMSH_KIND_GPTR "gptr"            // the site entries: the host fills them per draw or dispatch
+#define DMSH_GPTR_CB_OFFSET 2
+#define DMSH_GPTR_MAX 64                 // sites a shader may have; its loads past them search the table
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 8                 // bytes before element 0 of a pool buffer

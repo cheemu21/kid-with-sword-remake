@@ -449,6 +449,22 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return true;
             }
 
+            // nxnative: a handle loaded from a constant buffer at a computed offset (the game's own handle table, which BindlessToArray leaves to the pools), alone or ORed with a constant
+            // buffer word (handle type 1: its separate sampler in c[2], Kirby Air Riders' shadow cascades)
+            if (bindlessHandle.AsgOp is Operation { Inst: Instruction.BitwiseOr } orOp)
+            {
+                Operand a = orOp.GetSource(0), b = orOp.GetSource(1);
+
+                // only with a load on the other side: two static words (or a phi of them) are a handle TryConvertBindless / TryTableHandle name by slot
+                return (a.Type == OperandType.ConstantBuffer && b.AsgOp is Operation { Inst: Instruction.Load } && IsBindlessAccessAllowed(b)) ||
+                       (b.Type == OperandType.ConstantBuffer && a.AsgOp is Operation { Inst: Instruction.Load } && IsBindlessAccessAllowed(a));
+            }
+
+            if (bindlessHandle.AsgOp is Operation { Inst: Instruction.Load, StorageKind: StorageKind.ConstantBuffer })
+            {
+                return true;
+            }
+
             if (bindlessHandle.AsgOp is not Operation handleOp ||
                 handleOp.Inst != Instruction.Load ||
                 (handleOp.StorageKind != StorageKind.Input && handleOp.StorageKind != StorageKind.StorageBuffer))

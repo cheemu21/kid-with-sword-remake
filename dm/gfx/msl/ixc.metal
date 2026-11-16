@@ -4,8 +4,9 @@ using namespace metal;
 struct ajob { device const uint *rec; device uint *args; uint prim, cap; };
 kernel void ixc_arrays(device const ajob *j [[buffer(0)]], uint i [[threadgroup_position_in_grid]]) {
   device const uint *s = j[i].rec;
-  if (j[i].prim == 0x40) { // DM_PRIM_MESH_TASKS: count, first task → grid XYZ and first workgroup uniform
-    device uint *d = j[i].args; d[0] = s[0]; d[1] = 1; d[2] = 1; d[3] = 0; d[4] = s[1]; return;
+  if (j[i].prim == 0x40) { // DM_PRIM_MESH_TASKS: NVN's {count, first} → a task shader's grid {count, 1, 1} at +0, {count, first} at +12 for the task or object function
+    // (DMSH_MESH_DRAW_SLOT), and at +20 the object grid of a mesh shader with no task, blocks of DMSH_MESH_GRID (1024) workgroups (nvn_geometry.inc mtk_encode, dmsh_meshstage.py main0_o)
+    device uint *d = j[i].args; uint c = s[0]; d[0] = c; d[1] = 1; d[2] = 1; d[3] = c; d[4] = s[1]; d[5] = c / 1024u + (c % 1024u != 0u); d[6] = 1; d[7] = 1; return;
   }
   uint n = s[0], c = j[i].prim == 7 ? n / 4 * 6 : n >= 3 ? (n - 2) * 3 : 0;
   device uint *d = j[i].args; d[0] = min(c, j[i].cap); d[1] = s[1]; d[2] = 0; d[3] = s[2]; d[4] = s[3]; }

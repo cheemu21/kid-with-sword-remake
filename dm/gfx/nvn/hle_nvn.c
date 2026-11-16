@@ -401,7 +401,9 @@ static void ft_add(const tex_t *t) {
     // COMPRESSIBLE is a memory-compression hint, not a data format: a game that sets it on every texture it creates (SD GUNDAM G GENERATION CROSS RAYS,
     // SDK 9.4.1) still writes plain texels, so those textures must be registered too or the CPU writes that follow stay invisible (its tutorial overlay's
     // background never appeared). A CPU_NO_ACCESS pool keeps the exclusion: there the compression tags may really be there.
-    if (!DM_GAME_TEX_FLUSH_UPLOAD || !t->mem || !t->pool || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+    // A sparse pool's addresses are no memory the CPU writes or flushes, and no range nvn_dirty tracks, so they read as dirty at once: every texture in one, a render target too, came out CPU-written at its first
+    // use in a profile with tex_dirty_upload. What the CPU wrote into the physical pages behind one is seen through the page table instead (tex_from_storage, sparse_look)
+    if (!DM_GAME_TEX_FLUSH_UPLOAD || !t->mem || !t->pool || t->pool->vp || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
         (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return;
     pthread_mutex_lock(&g_ft_mu);
     if (g_nft == g_cft && !(g_ft = realloc(g_ft, (g_cft = g_cft ? 2 * g_cft : 1024) * sizeof *g_ft))) die("flush_tex allocation failed");
@@ -438,15 +440,15 @@ int nvn_ft_tracked(uint64_t serial) {   // registered and not resolved yet: its 
 // Later writes (tex_dirty_upload): a texture first resolved before the CPU filled it stays a GPU-only texture, and the first-use check above never runs for it again.
 // Once per submission, when guest memory has changed since the last look, the registered textures whose pages were written since registration become CPU-written
 // (tex_mtl_ in nvn_mtl.m then drops the GPU-only texture and uploads it). Tears of the Kingdom fills its 5120x5120 BC4 roughness atlas from the CPU after first binding it,
-// as tiles stream in. A texture the GPU writes (render target, shader-written image) may share pages with data the CPU writes: it leaves the list without an upload, which would
-// replace the GPU's content
+// as tiles stream in. A texture the GPU has written (an attachment, an image, a copy's or a clear's destination: mtl_tex_gpu_owned) may share pages with data the CPU writes: it leaves the
+// list without an upload, which would replace the GPU's content. One only made for such use, never written, is uploaded like any other (Ocarina of Time's terrain tiles)
 // Each poll looks at no more than FT_POLL_BYTES of registered textures, going on where the last one stopped; any guest write starts another pass over the whole list.
 // Checking every texture at every submission cost TOTK 0.4 ms of submit CPU per frame on the Mac; this way a texture is picked up a few submissions later at most
 enum { FT_POLL_BYTES = 128 << 20 };
 void nvn_ft_poll(void) {
     if (!DM_GAME_TEX_DIRTY_UPLOAD) return;
     static uint64_t gen; static size_t cur, left;
-    static tex_t *hit; static size_t chit; size_t nhit = 0;
+    static flush_tex *hit; static size_t chit; size_t nhit = 0;
     uint64_t now = nvn_dirty_now(), scanned = 0;
     pthread_mutex_lock(&g_ft_mu);
     if (now != gen) { gen = now; left = g_nft; }   // guest memory changed: every entry gets one more look
@@ -455,11 +457,24 @@ void nvn_ft_poll(void) {
         scanned += g_ft[cur].size; left--;
         if (nvn_dirty_since_span(g_ft[cur].span, g_ft[cur].mem, g_ft[cur].size, g_ft[cur].stamp)) {
             if (nhit == chit && !(hit = realloc(hit, (chit = chit ? 2 * chit : 64) * sizeof *hit))) die("nvn_ft_poll allocation failed");
-            hit[nhit++] = g_ft[cur].t; g_ft[cur] = g_ft[--g_nft];
+            hit[nhit++] = g_ft[cur]; g_ft[cur] = g_ft[--g_nft];
         } else cur++;
     }
     pthread_mutex_unlock(&g_ft_mu);
-    for (size_t i = 0; i < nhit; i++) if (!mtl_tex_gpu_owned(hit[i].serial)) mtl_tex_cpu_written(&hit[i]);   // outside g_ft_mu: the ownership check takes the replay's serial table lock
+    for (size_t i = 0; i < nhit; i++) {   // outside g_ft_mu: the ownership check takes the replay's serial table lock
+        static uint64_t up, up_gw, kept; unsigned gw = mtl_tex_gpu_writes(hit[i].t.serial); unsigned long long glv = (unsigned long long)mtl_tex_gpu_levels(hit[i].t.serial);
+        if (!mtl_tex_gpu_owned(hit[i].t.serial)) { mtl_tex_cpu_written(&hit[i].t); up++; up_gw += gw != 0;
+            if (up <= 4 || (gw && (up_gw <= 4 || up_gw % 100 == 0)))   // the first few, and those the GPU had written yet does not own (mtl_tex_gpu_owned)
+                LOG("[nvn] registered texture written by the CPU after its first use: uploaded from its storage (ser=%llu %ux%ux%u format %#x levels %u, %llu bytes; GPU writes %#x, levels %#llx; %llu such)",
+                    (unsigned long long)hit[i].t.serial, hit[i].t.d.width, hit[i].t.d.height, hit[i].t.d.depth, hit[i].t.d.format, hit[i].t.d.levels, (unsigned long long)hit[i].t.L.size, gw, glv, (unsigned long long)up_gw);
+            continue; }
+        // Whether the CPU wrote inside it, or only pages it shares with its neighbours (its storage starts and ends inside pages): the first could be content the GPU never sees
+        static uint64_t inner; const uint64_t pg = 16384;
+        if (hit[i].size > 2 * pg && nvn_dirty_since_span(hit[i].span, hit[i].mem + pg, hit[i].size - 2 * pg, hit[i].stamp)) inner++;
+        kept++;   // the first few left to the GPU, and every 100th: the GPU's writes (1 attachment, 2 image, 4 copy, 8 clear, 0x10 DLSS, 0x20 DrawTexture) say what its content is
+        if (kept <= 4 || kept % 100 == 0) LOG("[nvn] registered texture written by the CPU after its first use, kept as the GPU's (its GPU writes %#x, levels %#llx): ser=%llu %ux%ux%u format %#x levels %u, %llu bytes (%llu kept, %llu of them written inside, not only in pages shared with neighbours; %llu uploaded so far)",
+                                              gw, glv, (unsigned long long)hit[i].t.serial, hit[i].t.d.width, hit[i].t.d.height, hit[i].t.d.depth, hit[i].t.d.format, hit[i].t.d.levels, (unsigned long long)hit[i].t.L.size, (unsigned long long)kept, (unsigned long long)inner, (unsigned long long)up);
+    }
 }
 static void ft_flush(const uint8_t *a, uint64_t n) {
     if (!DM_GAME_TEX_FLUSH_UPLOAD || !a || !n) return;
@@ -596,6 +611,15 @@ NVN(nvnTextureGetViewOffset, ptrdiff_t, const NVNtexture *t, const NVNtextureVie
     if (!w) return 0;
     uint64_t off = w->set_levels ? nvn_tex_level_offset(&o->d, (unsigned)w->base_level) : 0;
     if (w->set_layers) off += (uint64_t)w->min_layer * o->L.layer_size;
+    return (ptrdiff_t)off;
+}
+// The same offset from a builder's description, before a texture exists (Kirby Air Riders calls it for its views): the layout nvnTextureBuilderGetStorageSize computes
+NVN_NOPROTO(nvnTextureBuilderGetViewOffset, ptrdiff_t, const NVNtextureBuilder *b, const NVNtextureView *v) {
+    const tex_builder_t *o = (const tex_builder_t *)b; const view_t *w = (const view_t *)v;
+    if (!w) return 0;
+    nvn_texlayout L; nvn_tex_layout(&o->d, &L);
+    uint64_t off = w->set_levels ? nvn_tex_level_offset(&o->d, (unsigned)w->base_level) : 0;
+    if (w->set_layers) off += (uint64_t)w->min_layer * L.layer_size;
     return (ptrdiff_t)off;
 }
 // CPU texture read (NVN ReadTexels): for packaged textures the pool memory is the ground truth (de-layout and read directly); GPU-written textures are read back from the MTLTexture (nvn_mtl.m)
@@ -738,7 +762,8 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
             }
         }
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
-        if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
+        // Only the section's own bytes: an NVN2 section is 72 bytes, and a fixed 0x880-byte copy read past the end of its mapping (Kirby Air Riders, SIGBUS in this memcpy)
+        if (dump && sd[i].control) { uint32_t nctl, ncode; nvn_ctl_lens(sd[i].control, &nctl, &ncode); void *c = calloc(1, 0x880); memcpy(c, sd[i].control, nctl < 0x880 ? nctl : 0x880); o->sd[i].control = c; }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     mtl_prog_prefetch(o);   // its libraries load in the background now, not at its first draw
@@ -1223,6 +1248,9 @@ NVN(nvnBlendStateSetBlendEquation, void, NVNblendState *s, NVNblendEquation er, 
 NVN(nvnBlendStateSetAdvancedMode, void, NVNblendState *s, NVNblendAdvancedMode mode) { ST(blend_st, s)->adv = (unsigned)mode <= NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY ? mode : 0; }
 NVN(nvnBlendStateSetAdvancedPremultipliedSrc, void, NVNblendState *s, uint32_t pm) { ST(blend_st, s)->adv_npm = !B(pm); }
 NVN(nvnBlendStateSetAdvancedOverlap, void, NVNblendState *s, NVNblendAdvancedOverlap o) { ST(blend_st, s)->adv_ovl = (unsigned)o & 3; }
+// Kirby Air Riders sets it true (the default) on its blend states. A destination that is not normalized (false) only differs for advanced modes, which the replay draws with fixed-function
+// equivalents that read the destination as stored (nvn_mtl.m): kept so Get answers what the game set, and a red line when an advanced mode is drawn with it
+NVN(nvnBlendStateSetAdvancedNormalizedDst, void, NVNblendState *s, uint32_t n) { ST(blend_st, s)->adv_nndst = !B(n); }
 NVN(nvnColorStateSetDefaults, void, NVNcolorState *s) { *ST(color_st, s) = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; }
 NVN(nvnColorStateSetBlendEnable, void, NVNcolorState *s, int i, uint32_t en) {
     color_st *o = ST(color_st, s); if (i < 0 || i > 7) return;
@@ -2475,6 +2503,7 @@ NVN(nvnBlendStateGetBlendEquation, void, const NVNblendState *s, NVNblendEquatio
 NVN(nvnBlendStateGetAdvancedMode, NVNblendAdvancedMode, const NVNblendState *s) { return (NVNblendAdvancedMode)((const blend_st *)s)->adv; }
 NVN(nvnBlendStateGetAdvancedPremultipliedSrc, NVNboolean, const NVNblendState *s) { return !((const blend_st *)s)->adv_npm; }
 NVN(nvnBlendStateGetAdvancedOverlap, NVNblendAdvancedOverlap, const NVNblendState *s) { return (NVNblendAdvancedOverlap)((const blend_st *)s)->adv_ovl; }
+NVN(nvnBlendStateGetAdvancedNormalizedDst, NVNboolean, const NVNblendState *s) { return !((const blend_st *)s)->adv_nndst; }
 NVN(nvnPolygonStateGetCullFace, NVNface, const NVNpolygonState *s) { return (NVNface)((const poly_st *)s)->cull; }
 NVN(nvnPolygonStateGetFrontFace, NVNfrontFace, const NVNpolygonState *s) { return (NVNfrontFace)((const poly_st *)s)->front; }
 NVN(nvnPolygonStateGetPolygonMode, NVNpolygonMode, const NVNpolygonState *s) { return (NVNpolygonMode)((const poly_st *)s)->mode; }

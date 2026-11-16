@@ -203,6 +203,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     handleIndex = 0;
                 }
 
+                // nxnative: a sampled texture (not a buffer texture) whose handle table is the game's own uniform buffer, not the driver's c[2]: the table is as long as the game makes it, and a
+                // fixed array of QueryTextureArrayLengthFromBuffer elements clamps every index past it onto its last element, which is no handle. Kirby Air Riders keeps about 31 shadow map
+                // handles 16 bytes apart in c[7] (picked by an index from a storage buffer); the array reached the first 16, and the middle cascades read element 31, so the road there was in
+                // shadow. Left bindless, BindlessElimination indexes the whole texture and sampler pools by the handle's own IDs (GenerateBindlessAccess), as the GPU reads it
+                if (src0CbufSlot != NvnTextureBufferIndex && gpuAccessor.QueryHostSupportsSeparateSampler() && !texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer)
+                {
+                    continue;
+                }
+
                 int length = Math.Max(MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromBuffer(src0CbufSlot));
 
                 // nxnative: handles at a computed index past a constant base, the base beyond the array's length: every read would clamp to its last element, which is no handle. Fire Emblem Fortune's

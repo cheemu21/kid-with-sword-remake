@@ -98,14 +98,18 @@ fps_payback	off
 # Pro (A17 Pro, 8 GB) gives the game about 6.0 GB, against 8.0 on an iPhone 18 Pro, and was ended by the system at the load after the opening cutscene (GPU allocated 2.8 → 7.0 GB in
 # 20 s). With Potato mode off none of these runs. The GPU memory guard lets go from 4,400 MB; a 64 MB texture recycle bin; shared textures nothing looked up for 600 fences swept; the
 # prewarm keeps no pipeline (warm-only, in the background); pools over 512 MB stay in the guest files, wired by the chunks the GPU reaches; render and depth targets of 4 MB and more
-# made only when a draw binds them (lazy textures). The Render scale stays the player's
-potato	DM_NVN_RES_EVICT_MB=4400,DM_NVN_TEX_RECYCLE_MB=64,DM_NVN_ALIAS_SWEEP=600,DM_PSO_WARM_ONLY=1,DM_PSO_PREPARE=0,DM_POOL_ANON_MAX_MB=512,DM_NVN_GMEM_NOBIG=1,DM_TEX_LAZY=2,DM_TEX_LAZY_MIN_KB=4096
+# made only when a draw binds them (lazy textures); large block-compressed textures without their two finest levels instead of one (tex_soft_levels 2: about 370 MB less at Link's
+# house on an 8 GB iPhone 16 Pro, which the system ended there for want of memory, 2026-11-13). The Render scale stays the player's
+potato	DM_NVN_RES_EVICT_MB=4400,DM_NVN_TEX_RECYCLE_MB=64,DM_NVN_ALIAS_SWEEP=600,DM_PSO_WARM_ONLY=1,DM_PSO_PREPARE=0,DM_POOL_ANON_MAX_MB=512,DM_NVN_GMEM_NOBIG=1,DM_TEX_LAZY=2,DM_TEX_LAZY_MIN_KB=4096,DM_NVN_TEX_SOFT_LEVELS=2
 pad_layout	native
 # The touch controls' Forest colours: blue A, green B, yellow X / Y, red +, deep green shoulders, bronze D-pad, gold rims, all translucent (DmGamepad.m theme_init)
 pad_theme	forest
 # Dynamic resolution reads the GPU time between the frame's timestamp reports, as on Donkey Kong Bananza and Breath of the Wild (the same EPD engine family): with one time a submission it
 # read about 0 and kept the full 1440x810 at 20-24 ms of GPU a frame on a MacBook Air M5. Each report takes its segment's GPU start / end (nvn_mtl.m rep_ticks)
 gpu_timestamps	segment
+# Draw passes are ordered by the game's own barriers, as on hardware, not each waiting for all earlier GPU work (about 180 full barriers a frame): its vertex work overlaps the previous
+# pass's fragments, and the image family heap's alias flush goes in the next pass's start barrier (nvn_mtl.m barrier_game, enc_r_begin_pass). DM_NVN_BARRIER=full turns it off
+draw_barriers	game
 # The game upscales through a chain: agl_ndsr_vr feature pass, network and blend at the render size, agl_ndsr_vr_light scale to 1920x1080. DM_UPSCALER=metalfx skips the chain for MetalFX (nvn_mtl.m up_chain)
 upscaler_chain	f8965bffbdf51d78,d17eefaff4f0bc23,a335c1db6270c355>aad7ea7e5c02f41d|b106afba1a18faa9|fa3033d05c0a41d6|04135bb812a0d66e|8df148d58b7cbe8e|d99fbeeb53d38847
 # Colour render targets drawn only as attachments (RGBA8 / BGRA8 / RGBA16F) kept with Metal lossy compression (rt_lossy, nvn_mtl.m rt_lossy): about 100 MB less in Link's house at 720p;

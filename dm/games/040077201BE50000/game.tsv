@@ -1,0 +1,41 @@
+# Kirby Air Riders (Switch 2, update v458752). Bring-up on the Mac: see README.md
+# Bandai Namco and Sora's engine ("phx": AssetLoadPipeline, JobWorker, Aurora graphics device; a Prism schema), SDK 20.5.26 built for the Switch 2 (Ounce), NVN2. PhysX 5 with its CUDA kernels in main.
+# Modules main, subsdk0 (NVIDIA's CUDA driver, 49 cu* imports of main), sdk; subsdk1 (NVIDIA NGX / DLSS) is not imported by main. One NRO, Bin/Module/EffectScript.nro (nn::ro).
+# The RomFS: Asset/assets_a000.dat and assets_b000.dat ('PDAT' archives of zstd assets, indexed by Asset/assets.cat, 'PARC'), Asset.Streaming (sound streams, a movie), Bin (the NDSR upscaler, config).
+# Shaders: NVN2 programs in the PMAP assets of the PDAT archives (shader_split.py pdat_jobs, phx_shaders) and the NDSR pack.
+
+# ---- Identity ----
+title_id	040077201BE50000
+program_id	040077201BE50000
+
+# ---- App ----
+name	Kirby Air Riders
+ipa	KirbyAirRiders.ipa
+app_category	public.app-category.racing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v458752	v458752	main=9ede03836568bcd34434dfc29bc61e04	subsdk0=11a5672eeabf787e8e510902825606d4	sdk=89ea3537110354e8427004a0266744c8
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+# main imports nothing from subsdk1 (NVIDIA NGX / DLSS) that the host does not supply (dm/games/profile_guess.py modules)
+modules	main subsdk0 sdk
+romfs_marker	Asset/assets_a000.dat
+zip_store	.bin:.cat:.dat:.metallib
+
+# ---- Memory ----
+# The Switch 2's 9 GB. The NPDM declares 32 MB of system resource, so virtual address memory is on, and main never sets a heap. The guessed 4.38 GB alias region filled within a minute of the
+# title (mimalloc: unable to allocate OS memory, 64 MB); the alias region mapped up to +8.02 GB of 16 GB in the first 90 s (Star Fox's layout)
+mem_reserve	0x550000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x2000000
+# the game calls nvnDeviceSetDepthMode with near = 0 at boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/Asset.Streaming/=assetstreaming /Bin/=bin /Asset/=asset /.nrr/=nrr
+shader_note	Kirby Air Riders shaders

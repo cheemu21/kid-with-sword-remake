@@ -18,8 +18,25 @@ HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by 
 // Each call goes to the sdk's software C interface instead. The software decoder state lives in a host block kept per game decoder object (objmap), so the size of the
 // game's HardwareOpusDecoderType does not matter; the game's work buffer is sized by GetOpusDecoderWorkBufferSize and handed to the software decoder as is.
 #define SOFT_OPUS_STATE 0x200   // bytes for the software OpusDecoderType (larger than the SDK's)
+// Every host state kept in objmap for a game decoder object starts with its kind, which the host writes: a plain decoder of the C interfaces here (its software state follows) or a decoder of
+// SDK 21's manager (opus_dec, below). FinalizeHardwareOpusDecoder and ResetHardwareOpusDecoder serve both and go by it. They used to tell them apart by a word of the software state, which the
+// SDK writes: a plain decoder whose state had a non-zero word at +0x10 was taken for a manager decoder, and its finalize followed garbage as the manager (Kirby Air Riders, h_codec_HwOpusFini+0xcc)
+enum { OPUS_PLAIN = 0x504c4e31, OPUS_MGR_DEC = 0x4d475231 };
+typedef struct { uint32_t kind; _Alignas(16) uint8_t soft[SOFT_OPUS_STATE]; } opus_plain;
 static void *opus_fn(const char *name) { void *f = guest_sym(name); if (!f) die("sdk lacks %s", name); return f; }
-static void *opus_soft(const void *hw) { void *s = objmap_get(hw); if (!s) die("Opus decoder %p was not initialized by the host", hw); return s; }
+static void *opus_plain_new(const void *hw) {   // the software state of a plain decoder, made on its first Initialize and kept until Finalize
+    opus_plain *p = objmap_get(hw);
+    if (p && p->kind != OPUS_PLAIN) die("Opus decoder %p is a decoder of a manager, initialized again through the plain interface", hw);
+    if (!p) { if (!(p = calloc(1, sizeof *p))) die("Opus decoder calloc"); p->kind = OPUS_PLAIN; objmap_put(hw, p); }
+    return p->soft;
+}
+static void *opus_soft(const void *hw) {
+    opus_plain *p = objmap_get(hw); if (!p || p->kind != OPUS_PLAIN) die("Opus decoder %p was not initialized by the host", hw); return p->soft;
+}
+static int opus_plain_del(const void *hw, void (*fini)(void *)) {   // Finalize of a plain decoder: 1 when hw was one (its state finalized and freed)
+    opus_plain *p = objmap_get(hw); if (!p || p->kind != OPUS_PLAIN) return 0;
+    objmap_del(hw); fini(p->soft); free(p); return 1;
+}
 HLE_FORCE("_ZN2nn5codec36GetHardwareOpusDecoderWorkBufferSizeEiii", "hwopus service; work buffer computed for the software decoder", size_t, h_codec_HwOpusWorkSize, int rate, int ch, int option) {
     (void)option; size_t (*f)(int, int) = opus_fn("_ZN2nn5codec28GetOpusDecoderWorkBufferSizeEii"); return f(rate, ch);
 }
@@ -31,14 +48,12 @@ HLE_FORCE("_ZN2nn5codec36GetHardwareOpusDecoderWorkBufferSizeEii", "hwopus servi
 HLE_FORCE("_ZN2nn5codec29InitializeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeEiiPvmi", "hwopus service; replaced by the software OpusDecoder", int, h_codec_HwOpusInit,
           void *hw, int rate, int ch, void *buf, size_t size, int option) {
     (void)option; int (*f)(void *, int, int, void *, size_t) = opus_fn("_ZN2nn5codec21InitializeOpusDecoderEPNS0_15OpusDecoderTypeEiiPvm");
-    void *s = objmap_get(hw); if (!s) { s = calloc(1, SOFT_OPUS_STATE); objmap_put(hw, s); }
-    return f(s, rate, ch, buf, size);
+    return f(opus_plain_new(hw), rate, ch, buf, size);
 }
 static int opus_mgr_dec_fini(void *gd); static int opus_mgr_dec_reset(void *gd);   // a decoder of a manager (below)
 HLE_FORCE("_ZN2nn5codec27FinalizeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", void, h_codec_HwOpusFini, void *hw) {
     if (opus_mgr_dec_fini(hw)) return;
-    void (*f)(void *) = opus_fn("_ZN2nn5codec19FinalizeOpusDecoderEPNS0_15OpusDecoderTypeE");
-    void *s = objmap_del(hw); if (s) { f(s); free(s); }
+    opus_plain_del(hw, opus_fn("_ZN2nn5codec19FinalizeOpusDecoderEPNS0_15OpusDecoderTypeE"));
 }
 HLE_FORCE("_ZN2nn5codec32GetHardwareOpusDecoderSampleRateEPKNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", int, h_codec_HwOpusRate, const void *hw) {
     int (*f)(const void *) = opus_fn("_ZN2nn5codec24GetOpusDecoderSampleRateEPKNS0_15OpusDecoderTypeE"); return f(opus_soft(hw));
@@ -89,12 +104,10 @@ HLE_FORCE("_ZN2nn5codec47GetHardwareOpusMultiStreamDecoderWorkBufferSizeEiiiii",
 HLE_FORCE("_ZN2nn5codec40InitializeHardwareOpusMultiStreamDecoderEPNS0_34HardwareOpusMultiStreamDecoderTypeEiiiiPKhPvmi", "hwopus service; replaced by the software OpusMultiStreamDecoder",
           int, h_codec_HwOpusMsInit, void *hw, int rate, int ch, int streams, int stereo, const uint8_t *mapping, void *buf, size_t size, int option) {
     (void)option; int (*f)(void *, int, int, int, int, const uint8_t *, void *, size_t) = opus_fn("_ZN2nn5codec32InitializeOpusMultiStreamDecoderEPNS0_26OpusMultiStreamDecoderTypeEiiiiPKhPvm");
-    void *s = objmap_get(hw); if (!s) { s = calloc(1, SOFT_OPUS_STATE); objmap_put(hw, s); }
-    return f(s, rate, ch, streams, stereo, mapping, buf, size);
+    return f(opus_plain_new(hw), rate, ch, streams, stereo, mapping, buf, size);
 }
 HLE_FORCE("_ZN2nn5codec38FinalizeHardwareOpusMultiStreamDecoderEPNS0_34HardwareOpusMultiStreamDecoderTypeE", "hwopus service; software OpusMultiStreamDecoder", void, h_codec_HwOpusMsFini, void *hw) {
-    void (*f)(void *) = opus_fn("_ZN2nn5codec30FinalizeOpusMultiStreamDecoderEPNS0_26OpusMultiStreamDecoderTypeE");
-    void *s = objmap_del(hw); if (s) { f(s); free(s); }
+    opus_plain_del(hw, opus_fn("_ZN2nn5codec30FinalizeOpusMultiStreamDecoderEPNS0_26OpusMultiStreamDecoderTypeE"));
 }
 HLE_FORCE("_ZN2nn5codec43GetHardwareOpusMultiStreamDecoderSampleRateEPKNS0_34HardwareOpusMultiStreamDecoderTypeE", "hwopus service; software OpusMultiStreamDecoder", int, h_codec_HwOpusMsRate, const void *hw) {
     int (*f)(const void *) = opus_fn("_ZN2nn5codec35GetOpusMultiStreamDecoderSampleRateEPKNS0_26OpusMultiStreamDecoderTypeE"); return f(opus_soft(hw));
@@ -132,10 +145,10 @@ HLE_FORCE("_ZN2nn5codec47GetHardwareOpusMultiStreamDecoderProcessingTimeEPKNS0_3
 #define OPUS_MAX_PCM (960 * 2 * 2 * 3)         // a frame of up to 60 ms, stereo, 16-bit
 typedef struct opus_req { struct opus_req *next; size_t n; int samples; uint8_t data[]; } opus_req;   // a waiting packet, then (decoded) its PCM
 typedef struct opus_mgr opus_mgr;
-typedef struct { opus_mgr *m; void *soft; void *work; int ch; opus_req *wait, *wait_tail, *done, *done_tail; int nwait, ndone; } opus_dec;
+typedef struct { uint32_t kind; opus_mgr *m; void *soft; void *work; int ch; opus_req *wait, *wait_tail, *done, *done_tail; int nwait, ndone; } opus_dec;
 struct opus_mgr { pthread_mutex_t lock; void *event; int io_total, io_used, ndec, cap; opus_dec **dec; };
 static opus_mgr *opus_mgr_of(const void *gm) { opus_mgr *m = *(opus_mgr *const *)gm; if (!m) die("Opus decoder manager %p was not initialized by the host", gm); return m; }
-static opus_dec *opus_dec_of(const void *gd) { opus_dec *d = objmap_get(gd); if (!d) die("Opus decoder %p was not initialized by the host", gd); return d; }
+static opus_dec *opus_dec_of(const void *gd) { opus_dec *d = objmap_get(gd); if (!d || d->kind != OPUS_MGR_DEC) die("Opus decoder %p was not initialized by the host", gd); return d; }
 static void opus_free_list(opus_req *r) { while (r) { opus_req *n = r->next; free(r); r = n; } }
 
 HLE_FORCE("_ZN2nn5codec43GetHardwareOpusDecoderManagerWorkBufferSizeEiiNS_8TimeSpanEii", "hwopus service; the host keeps the manager's state, the work buffer is not used",
@@ -168,6 +181,7 @@ HLE_FORCE("_ZN2nn5codec29InitializeHardwareOpusDecoderEPNS0_23HardwareOpusDecode
     size_t (*wsize)(int, int) = opus_fn("_ZN2nn5codec28GetOpusDecoderWorkBufferSizeEii");
     int (*init)(void *, int, int, void *, size_t) = opus_fn("_ZN2nn5codec21InitializeOpusDecoderEPNS0_15OpusDecoderTypeEiiPvm");
     opus_dec *d = calloc(1, sizeof *d); if (!d) die("Opus decoder calloc");
+    d->kind = OPUS_MGR_DEC;
     size_t ws = wsize(rate, ch);
     if (!(d->soft = calloc(1, SOFT_OPUS_STATE)) || !(d->work = calloc(1, ws))) die("Opus decoder calloc");
     int r = init(d->soft, rate, ch, d->work, ws);
@@ -187,7 +201,7 @@ static void opus_dec_clear(opus_dec *d) {   // under the manager's lock: every r
 }
 // FinalizeHardwareOpusDecoder and ResetHardwareOpusDecoder are the hooks above (the older C interface): both find this decoder through objmap first
 static int opus_mgr_dec_fini(void *gd) {
-    opus_dec *d = objmap_get(gd); if (!d || !d->work) return 0;   // the older interface's state has no work buffer of its own
+    opus_dec *d = objmap_get(gd); if (!d || d->kind != OPUS_MGR_DEC) return 0;   // a plain decoder (the older interface)
     objmap_del(gd);
     void (*fini)(void *) = opus_fn("_ZN2nn5codec19FinalizeOpusDecoderEPNS0_15OpusDecoderTypeE");
     opus_mgr *m = d->m;
@@ -200,7 +214,7 @@ static int opus_mgr_dec_fini(void *gd) {
     return 1;
 }
 static int opus_mgr_dec_reset(void *gd) {
-    opus_dec *d = objmap_get(gd); if (!d || !d->work) return 0;
+    opus_dec *d = objmap_get(gd); if (!d || d->kind != OPUS_MGR_DEC) return 0;
     void (*reset)(void *) = opus_fn("_ZN2nn5codec16ResetOpusDecoderEPNS0_15OpusDecoderTypeE");
     if (d->m) pthread_mutex_lock(&d->m->lock);
     opus_dec_clear(d); reset(d->soft);

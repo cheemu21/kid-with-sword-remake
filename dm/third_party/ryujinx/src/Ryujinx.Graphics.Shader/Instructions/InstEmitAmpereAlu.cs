@@ -90,6 +90,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x203, InstName.P2r, AP2r, N);
             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
+            x(0x80d, InstName.Isetp, ACullSetp, N, writesRd: false);
             x(0x806, InstName.Vote, AVote, N);
             x(0x886, InstName.Vote, AVote, N);
             x(0x389, InstName.Shfl, AShfl, N);
@@ -816,6 +817,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             ASetPred(context, x.Bits(81, 84), GetPredLogicalOp(context, bop, cmp, p), u);
             ASetPred(context, x.Bits(84, 87), GetPredLogicalOp(context, bop, context.BitwiseNot(cmp), p), u);
+        }
+
+        // 0x80d: the 9-bit opcode 0x00d beside ISETP (0x00c), in no table at hand (CuAssembler's sm_86 records go from ISETP to IADD3). Kirby Air Riders' GLSLC (SDK 20.5.26) puts it in the
+        // prologue of every vertex shader (6,319): FSETPs compare the position with its bounds into P0..P6, then two of these, the first with immediate 0xc4321111 and predicate destinations PT,
+        // the second with 0x80000000, compare GE (76..78 = 6) and its first destination P0, then @P0 EXIT ahead of the outputs: an early-out for a vertex whose primitive is culled. Its fields are
+        // ISETP's (destinations 81..84 and 84..87, combine 87..90), but what it reduces is not known, so both destinations are written false: the shader never takes that exit, and what it would
+        // have skipped is outside the clip volume, which the rasterizer clips. Only the immediate form with those fields is taken; any other is refused
+        public static void ACullSetp(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            if (x.Bit(72) || x.Bits(87, 90) != 7 || x.Bits(74, 76) != 0)
+            {
+                throw AFail(context, $"0x80d form {x.Hi:x16}{x.Lo:x16}");
+            }
+
+            ASetPred(context, x.Bits(81, 84), Const(IrConsts.False), false);
+            ASetPred(context, x.Bits(84, 87), Const(IrConsts.False), false);
         }
 
         // IADD3 Rd, Pc0, Pc1, a, b, c: a + b + c. A negated source is its two's complement; with .X (74) its bitwise not, and the carry predicates (87..90,

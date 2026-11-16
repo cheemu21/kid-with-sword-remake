@@ -211,10 +211,16 @@ static void reuse_case(NvProg *pr) {
       CHECK(g_enc != nil, "so does the next one, which writes no depth");
       S.ds.dw = 1; fb_prepare(pr);
       CHECK(!g_enc, "a draw writing depth after a read of it ends the pass");
+      CHECK(g_fb_n == 1 && g_fb_use[0] && g_fb_use[0] != g_fb_src[0], "and, reading the depth it writes, samples a copy taken before it");
+      { uint64_t dn = g_fb_dcount; fb_prepare(pr); CHECK(g_fb_n == 1 && g_fb_dcount == dn + 1, "the next such draw takes a copy of its own: the one before wrote depth"); }
       R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();   // that draw read it too, and began the pass it would open: the next pass is a clean one
       clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; S.tex[1][0] = 0;
       fb_prepare(pr);
       CHECK(g_enc != nil, "a draw writing depth with no read of it in its pass stays");
+      S.ds.dw = 0; S.tex[1][0] = 651;
+      fb_prepare(pr);
+      CHECK(!g_enc, "a draw reading depth after a write of it in the same pass ends the pass");
+      clear(MTLClearColorMake(0, 0, 0, 1));   // the pass that draw draws in: its read of depth counts there, not in the next case's
       R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; rp_end(); mtl_tex_release(&output); mtl_tex_release(&depth); }
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");

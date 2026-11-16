@@ -77,6 +77,13 @@
 - **Fix:** count uncompressed bytes as they are read and compare them with the listed size before completing either streamed method. A mismatch stops the pack and removes the partial archive, preserving the previous IPA and its reuse index. Regression tests cover growth and shrinkage with both deflate and store.
 - **Found on:** synthetic IPA inputs while reviewing [PR #279](https://github.com/seedds/nxnative/pull/279); no game files required.
 
+### A sideloader cannot install an IPA with a file over 4 GB or a pipeline archive
+
+- **Symptom:** Sideloadly uploads the IPA to 100 %, then stops with `PackageExtractionFailed (Could not extract archive)` and retries forever, with any amount of free space on the phone. AltServer stops before the upload with `ldid.cpp(869): _assert(): Swap(mach_header_->filetype) == MH_EXECUTE || … == MH_BUNDLE`.
+- **Cause:** neither installs the IPA `pack_ipa.py` writes, which is a valid zip64 archive. Sideloadly (0.72) unpacks, signs and packs it again (its temporary `sideloadly-*.ipa`, XORed with 0xAA): an entry of 4 GiB or more uncompressed gets a data descriptor with 8-byte sizes, but its local header has version 20 and no zip64 extra field. iOS extracts the archive as a stream from the local headers, so it reads that descriptor's sizes as 4-byte fields and fails. Entries under 4 GiB are not affected (a 3.4 GB pipeline archive installs). AltServer signs every Mach-O in the bundle with `ldid`, which accepts only executables, libraries, dylinkers and bundles; a pipeline archive (`pso/*.mtl4a`) is a Mach-O GPU executable (file type 13). Sideloadly leaves it unsigned with a `[WARN]` line, which is right: the app does not load it as code.
+- **Workaround:** install from Xcode: `--prepare-xcode` ([Build and run on a device with Xcode](../development.md#build-and-run-on-a-device-with-xcode)) copies the bundle as a folder and signs with `codesign`. With `--romfs separate` the app holds no RomFS, and `push_romfs.sh` copies the image once. Open: an IPA that Sideloadly can install would need every file under 4 GiB, so the shader image (`msl/b-<chain>.img`, 6.1 GB for Ocarina of Time) split into parts the host reads together; AltServer would need the pipeline archive left out.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#iphone), its first iPhone install (iPhone 16 Pro, iOS 27.2.1): the bundled IPA (a 26 GB `romfs.img`) and the `--romfs separate` IPA (the 6.1 GB shader image) both failed in Sideloadly; the separate IPA failed in AltServer on `applegpu_g18p.mtl4a`.
+
 ## RomFS images
 
 ### RomFS folder transfers fail or leave stale game files

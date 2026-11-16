@@ -43,6 +43,7 @@
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
+#   · PDAT (Kirby Air Riders' engine, "phx"): NVN2 programs in its PMAP assets, each a zstd frame in Asset/assets_*.dat, a control section with its code area right after it, see pdat_jobs and phx_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
@@ -861,6 +862,68 @@ def zip_shaders(path, rel, names, out):
             d = zip_member(z, nm); n = len(out)
             scan_blob(d, f'/{rel}/{nm}', out)
             if len(out) == n and d[:4] != b'MSHD' and b'\x91\x68\x86\x19' in d: out += glslc_shaders(d, f'/{rel}/{nm}', need=False)
+
+PDAT, ZSTD_FRAME = b'PDAT', b'\x28\xb5\x2f\xfd'
+def pdat_jobs(files, parts=64):
+    """Kirby Air Riders' asset archives (Asset/assets_a000.dat, 16.6 GB, and assets_b000.dat; 'PDAT', indexed by the 'PARC' catalog Asset/assets.cat): their assets are zstd frames, 194,047 in
+    assets_a000.dat, among a few stored plain. The frames are found by their magic, in ranges of about equal length; a magic inside another frame's data is no frame of its own, which the decode
+    tells (pdat_shaders). → ([(path, rel, (PDAT, starts, end)), …], the archive paths); one more job per archive scans its stored bytes outside the frames (starts None)"""
+    from romfs import mmap
+    jobs, taken = [], set()
+    for p, r in files:
+        with open(p, 'rb') as f: h = f.read(4)
+        if h != PDAT: continue
+        taken.add(p)
+        with open(p, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+            n, starts, at, ch = len(d), [], 0, 1 << 28
+            while at < n:
+                starts += [at + m.start() for m in re.finditer(re.escape(ZSTD_FRAME), d[at:min(n, at + ch + 3)]) if m.start() < ch]; at += ch
+        step = max(1, len(starts) // parts + 1)
+        jobs += [(p, r, (PDAT, tuple(starts[i:i + step + 64]), step, n)) for i in range(0, len(starts), step)]   # 64 more starts: a frame whose data holds the magic decodes past them
+        jobs.append((p, r, (PDAT, None, 0, n)))
+    return jobs, taken
+
+def pdat_frame(d, starts, i, n):
+    """The frame at starts[i] decoded, or None when it is not one (the magic inside another frame's data, or data that does not decode). Its input ends at the next start whose bytes the
+    decoder does not need: a start inside it (the magic in its data) is passed over"""
+    zstd = zstd_mod()
+    for j in range(i + 1, len(starts) + 1):
+        end = starts[j] if j < len(starts) else n
+        dec = zstd.ZstdDecompressor()
+        try: out = dec.decompress(d[starts[i]:end])
+        except zstd.ZstdError: return None
+        if dec.eof: return out
+    return None
+
+def phx_shaders(d, label):
+    """The NVN2 programs of a phx asset (Kirby Air Riders' PMAP, a FlatBuffers table: 'PMAP' at +4): each control section (version 0x11 at +8) is followed by its code area at the section plus
+    its u64 at +0x30 (0xe0), +0x44 bytes long, as in the movie library's NDVE programs (ndve_shaders). A PMAP holds one program, its vertex shader before its pixel shader (27,298 of the archive's
+    46,610 sections are in PMAP assets); a vertex shader and the pixel shader after it are one variation (#var, paired by var_pairs)"""
+    out, var = [], 0
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start()
+        if c & 3 or c + 0x68 > len(d) or not nvn2_ctl(d[c:c + NVN2_KEY_CTL]): continue
+        rel, n = struct.unpack_from('<Q', d, c + 0x30)[0], struct.unpack_from('<I', d, c + 0x44)[0]
+        if not 0x68 <= rel < 0x1000 or not n or c + rel + n > len(d): continue
+        ctl, code = d[c:c + rel], d[c + rel:c + rel + n]
+        st = nvn2_stage(ctl, code)
+        if st is None or check(label, st, ctl, code): continue
+        if st == 'vs': var += 1
+        out.append((f'{label}#PHX#var{var}' if st in ('vs', 'ps') else f'{label}#PHX@{c:#x}', st, ctl, code))   # a variation's two shaders share their label
+    return out
+
+def pdat_shaders(path, rel, job, out):
+    """A range of a PDAT archive's zstd frames (pdat_jobs), each decoded and read for phx programs; labels /<archive>#<frame offset>. With starts None, the archive's bytes outside the frames:
+    the programs of a stored asset are read in place"""
+    from romfs import mmap
+    _, starts, step, n = job
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+        if starts is None:
+            out += phx_shaders(d, f'/{rel}#stored')
+            return
+        for i in range(min(step, len(starts))):
+            b = pdat_frame(d, starts, i, n)
+            if b and CTL_MAGIC in b: out += phx_shaders(b, f'/{rel}#{starts[i]:x}')
 
 def pgdat_members(d, label):
     """A PlatinumGames DAT archive: 'DAT\\0', u32 file count, then the offsets of five tables: file offsets (u32 each), extensions (4 bytes each), names (u32 name length, then one name of that
@@ -2723,13 +2786,15 @@ def ue_shaders(d, label):
     return out
 
 def var_pairs(found):
-    """(vertex key, pixel key) within the same BNSH variation; (vertex key, pixel key, 'prog') within the same BAHS program variation (bahs_variations).
-    The tables stay separate; dmsh_build.py pads against both, as the pipeline prebuild uses both."""
+    """(vertex key, pixel key) within the same BNSH variation; (vertex key, pixel key, 'prog') within the same BAHS program variation (bahs_variations);
+    (mesh key, pixel key, 'mesh') within an NVN2 variation with a mesh shader. The tables stay separate; dmsh_build.py pads against all of them, as the pipeline prebuild uses the first two
+    (the mesh pairs go to the package's mesh_pairs.tsv, which only dmsh_build.py reads: the prebuild builds vertex pipelines)"""
     var = collections.defaultdict(dict)
     for where, st, ctl, code in found:
         g = where if '#var' in where else BAHS_VAR.get(where)
         if g: var[g][st] = skey(ctl, code)
-    return {(v['vs'], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() if 'vs' in v and 'ps' in v}
+    return ({(v['vs'], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() if 'vs' in v and 'ps' in v} |
+            {(v['ms'], v['ps'], 'mesh') for v in var.values() if 'ms' in v and 'ps' in v})
 
 def scan_file(args):
     """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', why).
@@ -2768,6 +2833,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_IO:   # export bundles of an IoStore container beside such a pak (ue_legacy_jobs)
         ue_io_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == PDAT:   # zstd frames of a phx asset archive (pdat_jobs)
+        pdat_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == FB_CAS:   # CompiledBytecode resources of a Frostbite cas file (frostbite_jobs)
         frostbite_shaders(path, rel, args[2][1], found)
@@ -2863,7 +2931,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:4] != b'NDVE': return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:4] not in (b'NDVE', b'NDSR'): return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -2960,8 +3028,9 @@ def main():
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs]
+    pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' phx asset archives: their zstd frames, in ranges
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
@@ -2988,7 +3057,8 @@ def main():
                 if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
-    prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
+    mesh = {(a, b) for a, b, *t in pairs if t == ['mesh']}   # mesh / pixel pairs: the package's mesh_pairs.tsv (var_pairs)
+    prog = {(a, b) for a, b, *t in pairs if t == ['prog']} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
     os.makedirs(pkg, exist_ok=True)
@@ -3034,6 +3104,9 @@ def main():
         with open(pairsout, 'w') as f:
             f.write('# kind: evidence  vertex / pixel shader pairs within BNSH variations (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
             for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
+    with open(os.path.join(pkg, 'mesh_pairs.tsv'), 'w') as f:   # beside the packages, for dmsh_build.py's mesh output padding (dmsh_meshstage.pad)
+        f.write('# mesh / pixel shader pairs within NVN2 variations (generated by dm/gfx/tools/shader_split.py, do not edit): mesh key <TAB> pixel key\n')
+        for a, b in sorted(mesh): f.write(f'{a}\t{b}\n')
     if psopairsout:
         with open(psopairsout, 'w') as f:
             f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
