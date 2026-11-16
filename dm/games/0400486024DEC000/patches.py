@@ -70,7 +70,20 @@ def dynamic_resolution(ctx):
     if site is None or ctx.others.get('dynamic resolution update') is None: return   # not both found in this build (a red line from the locator): the game's own dynamic resolution
     fs_site(site, '017c40bd')   # ldr s1,[x0,#0x7c]
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in drs_controller: emit(w)
+    # kid-with-sword-remake L5: the threshold (word 5, ldr s1,[x0,#0x10]) is the host's when it gives one (state +0x2a4, a float in the game's load units; 0 = the game's own 83,
+    # about 16.4 ms). The game's is a 60 fps frame: at the 30 fps cap an iPhone lowers the GPU clock until the work fills most of the 33 ms, so the load read 100-120 there and the
+    # controller would sit at its floor (dm/host/loader.c writes twice the game's at 30 fps)
+    first = here(); tail = first + 4 * len(drs_controller)
+    for k, w in enumerate(drs_controller):
+        assert (k != 5) or w == 0xbd401001
+        emit(B(here(), tail) if k == 5 else w)
+    assert here() == tail
+    for w in (0xbd401001,    # ldr s1,[x0,#0x10]      the game's threshold
+              0xbd42a602,    # ldr s2,[x16,#0x2a4]    the host's
+              0x1e202048,    # fcmp s2,#0.0
+              0x1e21cc41):   # fcsel s1,s2,s1,gt
+        emit(w)
+    emit(B(here(), first + 4 * 6))
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
@@ -90,7 +103,9 @@ def _cbz_w(frm, to, rt): return 0x34000000 | (((to - frm) >> 2) & 0x7ffff) << 5 
 def render_scale(ctx):
     here, emit = ctx.here, ctx.emit
     ctx.site(_scale_status, '089c60d3')   # ubfx x8,x0,#32,#8: the controller's status byte
-    s = here(); at = lambda k: s + 4 * k   # the stub's k-th word; done is word 16
+    # kid-with-sword-remake L5: with Dynamic Resolution on (state +0x2a0, a float: the lowest scale it may go to, 0 = off), the host scale is the ceiling and not the only
+    # size: a stored scale from that floor up to the host's is the game's own choice and is left alone; one above the host's, or below the floor, asks for new sizes as before
+    s = here(); at = lambda k: s + 4 * k   # the stub's k-th word; force is word 21, done word 22
     for k, w in enumerate((
             0xd3609c08,                       # ubfx x8,x0,#32,#8     the original
             0xa9be47f0,                       # stp x16,x17,[sp,#-32]!
@@ -98,25 +113,31 @@ def render_scale(ctx):
             0xf9000bf0,                       # str x16,[sp,#16]
             ADRP(16, at(4), ctx.state),
             0xb9401211,                       # ldr w17,[x16,#0x10]  the host scale's bits
-            _cbz_w(at(6), at(16), 17),        # cbz w17,done         unset
+            _cbz_w(at(6), at(22), 17),        # cbz w17,done         unset
             0x52a7f010,                       # mov w16,#0x3f800000
             0x6b10023f,                       # cmp w17,w16
-            _bcond(at(9), at(16), 0x8),       # b.hi done            over 1.0, negative or NaN: the game's own
+            _bcond(at(9), at(22), 0x8),       # b.hi done            over 1.0, negative or NaN: the game's own
             0x7100051f,                       # cmp w8,#1
-            _bcond(at(11), at(16), 0x0),      # b.eq done            status 1, the game's other request (main+0x31d3f4c), is left alone
+            _bcond(at(11), at(22), 0x0),      # b.eq done            status 1, the game's other request (main+0x31d3f4c), is left alone
             0xb94e5e90,                       # ldr w16,[x20,#0xe5c] the stored scale
             0x6b11021f,                       # cmp w16,w17
-            _bcond(at(14), at(16), 0x0),      # b.eq done            already the host's
-            0x52800008,                       # mov w8,#0            status 0: a new scale, so the sizes are recomputed
+            _bcond(at(14), at(22), 0x0),      # b.eq done            already the host's
+            _bcond(at(15), at(21), 0x8),      # b.hi force           above the host's (positive floats order as their bits)
+            ADRP(17, at(16), ctx.state),
+            0xb942a231,                       # ldr w17,[x17,#0x2a0] the dynamic floor's bits
+            _cbz_w(at(18), at(21), 17),       # cbz w17,force        Dynamic Resolution off: the host's size only
+            0x6b11021f,                       # cmp w16,w17
+            _bcond(at(20), at(22), 0x2),      # b.hs done            from the floor up: the game's dynamic scale
+            0x52800008,                       # force: mov w8,#0     status 0: a new scale, so the sizes are recomputed
             0xf9400bf0,                       # done: ldr x16,[sp,#16]
             0xd51b4210,                       # msr nzcv,x16
             0xa8c247f0)):                     # ldp x16,x17,[sp],#32
         assert here() == at(k); emit(w)
     emit(B(here(), _scale_status + 4))
-    ctx.put(_scale_status, [B(_scale_status, s)], 'dynamic-resolution status: a host render scale not yet stored asks for new 3D sizes (state +0x10)')
+    ctx.put(_scale_status, [B(_scale_status, s)], 'dynamic-resolution status: a host render scale not yet stored asks for new 3D sizes (state +0x10; with Dynamic Resolution, one outside its range, state +0x2a0)')
 
     ctx.site(_scale_store, '805e0ebd')    # str s0,[x20,#0xe5c]
-    s = here()   # original is word 11
+    s = here()   # fixed is word 16, original word 17
     for k, w in enumerate((
             0xadbf7ffe,                       # stp q30,q31,[sp,#-32]!
             0xa9bf47f0,                       # stp x16,x17,[sp,#-16]!
@@ -124,18 +145,24 @@ def render_scale(ctx):
             0xd53b4211,                       # mrs x17,nzcv
             0xbd40121e,                       # ldr s30,[x16,#0x10]  the host scale
             0x1e2023c8,                       # fcmp s30,#0.0
-            _bcond(at(6), at(11), 0xd),       # b.le original        unset, negative or NaN
+            _bcond(at(6), at(17), 0xd),       # b.le original        unset, negative or NaN
             0x1e2e101f,                       # fmov s31,#1.0
             0x1e3f23c0,                       # fcmp s30,s31
-            _bcond(at(9), at(11), 0xc),       # b.gt original        over 1.0
-            0x1e2043c0,                       # fmov s0,s30          the host's fixed scale
+            _bcond(at(9), at(17), 0xc),       # b.gt original        over 1.0
+            0xbd42a21f,                       # ldr s31,[x16,#0x2a0] the dynamic floor (0 = Dynamic Resolution off)
+            0x1e2023e8,                       # fcmp s31,#0.0
+            _bcond(at(12), at(16), 0xd),      # b.le fixed
+            0x1e3f6800,                       # fmaxnm s0,s0,s31     the game's dynamic scale, from the floor
+            0x1e3e7800,                       # fminnm s0,s0,s30     up to the host's
+            B(at(15), at(17)),
+            0x1e2043c0,                       # fixed: fmov s0,s30   the host's fixed scale
             0xbd0e5e80,                       # original: str s0,[x20,#0xe5c]
             0xd51b4211,                       # msr nzcv,x17
             0xa8c147f0,                       # ldp x16,x17,[sp],#16
             0xacc17ffe)):                     # ldp q30,q31,[sp],#32
         assert here() == at(k); emit(w)
     emit(B(here(), _scale_store + 4))
-    ctx.put(_scale_store, [B(_scale_store, s)], 'final 3D view scale: the host render scale fixes it, up to 1.0 (over 1.0 = the game\'s own)')
+    ctx.put(_scale_store, [B(_scale_store, s)], 'final 3D view scale: the host render scale fixes it, up to 1.0 (over 1.0 = the game\'s own); with Dynamic Resolution it is the ceiling of the game\'s dynamic scale')
 
     ctx.render_scale = 1   # the loader takes DM_RENDER_SCALE up to 1.0 and the launcher offers the row (patch_nso.py RENDER_SCALE)
 

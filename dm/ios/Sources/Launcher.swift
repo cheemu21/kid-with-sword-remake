@@ -103,8 +103,11 @@ private struct LauncherView: View {
     @State private var drawer = false
     @State private var background = LauncherBackgroundStore.image()
     @State private var statusLine = ""
-    // The quick tiles: the toggles players change most (the drawer has them too); a game without one shows the rest
-    private static let tiles = [("DM_FRAMEGEN", "Frame Generation", "waveform.path"), ("DM_COOL", "Cool Mode", "snowflake"), ("DM_WIDE_VIEW", "Wide View", "arrow.left.and.right"), ("DM_MIC", "Ocarina Mic", "mic")]
+    // The quick tiles, in one row: the frame limit (a choice, stepped through by taps), then the toggles players change most (the drawer has them too); a game without one shows the rest.
+    // Cool mode's tile went in L3 (the owner: partly useless; the render scale slider does what it did for the 3D)
+    // No Dynamic Resolution tile (L5): on this game a lower size costs more than it saves (the game rebuilds its textures at each size: its main thread 115 → 330-380 ms a second on an M5)
+    private static let limitTile = ("DM_FPS_TARGET", "Frame Limit", "speedometer")
+    private static let tiles = [("DM_FRAMEGEN", "Frame Generation", "waveform.path"), ("DM_WIDE_VIEW", "Wide View", "arrow.left.and.right"), ("DM_MIC", "Ocarina Mic", "mic"), ("DM_METAL_HUD", "Performance HUD", "gauge.with.dots.needle.33percent")]
 
     var body: some View {
         ZStack {
@@ -113,7 +116,7 @@ private struct LauncherView: View {
                 ZStack {
                     titleBlock
                     sideButtons
-                    bottomBar(width: g.size.width - 140)   // the room left of Play
+                    bottomBar(width: g.size.width)   // the whole width: Play and All Settings end above the row (L3: five tiles and the slider in one line)
                 }
             }
             .padding(.horizontal, 18).padding(.vertical, 14)
@@ -168,22 +171,25 @@ private struct LauncherView: View {
     private var tileSettings: [(Setting, String, String)] {
         Self.tiles.compactMap { t in m.settings.first(where: { $0.env == t.0 && $0.kind == "toggle" }).map { ($0, t.1, t.2) } }
     }
-    // the dial and the quick tiles: in one row where it fits (an iPhone 18 Pro's 874 points), else the tiles two by two beside the dial (an iPhone Duo's 678), else above it
-    @ViewBuilder private func dial(_ w: CGFloat = 236) -> some View {
-        if let scale = m.settings.first(where: { $0.env == "DM_RENDER_SCALE" }) { HeatDial(m: m, scale: scale, width: w) }
+    private var limitSetting: Setting? { m.settings.first { $0.env == Self.limitTile.0 && $0.kind == "choice" && ($0.options?.count ?? 0) > 1 } }
+    // the slider and the quick tiles: all in one row where it fits (an iPhone 18 Pro's 874 points), else the slider narrower, else the tiles in one row above the slider,
+    // else that row scrolling sideways (a small phone): never two by two
+    @ViewBuilder private func dial(_ w: CGFloat = 220) -> some View {
+        if let scale = m.settings.first(where: { $0.env == "DM_RENDER_SCALE" }) { ScaleSlider(m: m, scale: scale, width: w) }
     }
     private func tile(_ t: (Setting, String, String)) -> some View { QuickTile(m: m, s: t.0, title: t.1, icon: t.2) }
-    private var tileGrid: some View {
-        let rows = stride(from: 0, to: tileSettings.count, by: 2).map { Array(tileSettings[$0..<min($0 + 2, tileSettings.count)]) }
-        return VStack(alignment: .leading, spacing: 10) {
-            ForEach(rows.indices, id: \.self) { r in HStack(spacing: 10) { ForEach(rows[r], id: \.0.env) { tile($0) } } }
+    private var tileRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            if let l = limitSetting { ChoiceTile(m: m, s: l, title: Self.limitTile.1, icon: Self.limitTile.2) }
+            ForEach(tileSettings, id: \.0.env) { tile($0) }
         }
     }
     private func bottomBar(width: CGFloat) -> some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .bottom, spacing: 10) { dial(); ForEach(tileSettings, id: \.0.env) { tile($0) } }
-            HStack(alignment: .bottom, spacing: 10) { dial(200); tileGrid }
-            VStack(alignment: .leading, spacing: 10) { tileGrid; dial() }
+            HStack(alignment: .bottom, spacing: 10) { dial(); tileRow }
+            HStack(alignment: .bottom, spacing: 10) { dial(176); tileRow }
+            VStack(alignment: .leading, spacing: 10) { tileRow; dial() }
+            VStack(alignment: .leading, spacing: 10) { ScrollView(.horizontal, showsIndicators: false) { tileRow }; dial() }
         }
         .frame(maxWidth: max(width, 236), alignment: .bottomLeading)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -276,15 +282,9 @@ private struct LauncherView: View {
 }
 
 // This phone's starting values and the settings it can't use (LauncherModel.deviceDefaults / unavailable), before the model reads them.
-// Under 10 GB of memory (the iPhone 16, 16 Pro and 17 have 8 GB) Cool mode starts on: Ocarina of Time's footprint reached about 5.9 GB on a 12 GB iPhone 18 Pro (log 23),
-// and Cool mode's smaller 3D views and in-between frames take less memory and GPU time. A phone without MetalFX's Metal 4 frame interpolator gets no frame generation
+// (Cool mode went from the launcher in L3, and with it its default on phones under 10 GB of memory.) A phone without MetalFX's Metal 4 frame interpolator gets no frame generation
 // (the host's own check, nvn_mtl.m, leaves the game at 30 and records it for the next start; the launcher makes no Metal device, issue #840)
 private func deviceSetup() {
-    let gb = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-    if gb < 10 {
-        LauncherModel.deviceDefaults["DM_COOL"] = "1"
-        fputs(String(format: "launcher: this phone has %.1f GB of memory: Cool mode on by default\n", gb), stderr)
-    }
     // what the game found the last time it started (nvn_mtl.m fg_on): making a Metal device here, before startGame applies DM_METAL_HUD, would keep the Performance HUD off
     if UserDefaults.standard.bool(forKey: "dm.framegen.unsupported") {
         LauncherModel.unavailable["DM_FRAMEGEN"] = "This iPhone can't make in-between frames: MetalFX frame interpolation needs a newer chip. The game shows its own 30 fps."

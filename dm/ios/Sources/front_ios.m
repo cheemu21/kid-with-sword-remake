@@ -557,6 +557,20 @@ static void save_sync_background(void) {
     });
 }
 
+// The pipeline archive's writes (nvn_mtl.m mtl_arch_save hands them over as the app leaves the screen): a background task of their own, so iOS lets a write under way end before
+// it suspends the app. A compaction's write took 4-40 s on an iPhone 18 Pro (logs 37, 38), and one cut short left the old files and started the compaction again (kid-with-sword-remake L6)
+static void arch_background(void) {
+    int mtl_arch_wait_written(int ms);
+    UIApplication *app = UIApplication.sharedApplication;
+    __block UIBackgroundTaskIdentifier task = UIBackgroundTaskInvalid;
+    void (^end)(void) = ^{ if (task != UIBackgroundTaskInvalid) { [app endBackgroundTask:task]; task = UIBackgroundTaskInvalid; } };
+    task = [app beginBackgroundTaskWithName:@"pipeline archive" expirationHandler:end];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!mtl_arch_wait_written(25000)) LOG("front end: the pipeline archive's writes did not end before the app was suspended; they go on when it returns");
+        dispatch_async(dispatch_get_main_queue(), end);
+    });
+}
+
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
@@ -565,7 +579,7 @@ void front_ios_focus_event(int ev) {
             // The game's threads as they stand, the first 3 times the app leaves the screen: a player leaves a game that has stopped going on (the owner's log after the
             // Master Sword: the same white frame for 5 minutes, no error), and this is what each thread waits for (hle_thread.c svc_thread_dump_live: suspends no thread)
             { void svc_thread_dump_live(void); static int n; if (n++ < 3) { LOG("app to the background: the game's threads as they stand (what a game that stopped going on waits for)"); svc_thread_dump_live(); } }
-            g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
+            g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); arch_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;

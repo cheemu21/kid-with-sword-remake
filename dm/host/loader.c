@@ -365,6 +365,23 @@ void dm_fps_state_apply(void) {
     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
     if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", dr);
     memcpy(dm_fps_state + 0x40, &dyn, sizeof dyn);
+    // kid-with-sword-remake L5: Dynamic Resolution under the render scale (Ocarina of Time's patches.py: the status and store stubs, the level function's threshold). Before, a
+    // render scale fixed the size and the game's dynamic resolution changed nothing, and the launcher's slider always sets one. With both, the render scale is the ceiling and
+    // the game's controller may go down to DM_DRS_FLOOR of it (default 0.7: half the pixels; from 0.3 to 1.0), never under 0.25: state +0x2a0, a float, 0 = off. The controller
+    // steps down when the GPU load is over its threshold, 83 units (about 16.4 ms), a 60 fps frame: at a 30 fps cap the threshold is twice that (state +0x2a4, a float, 0 = the
+    // game's own; DM_DRS_THRESHOLD=<units> sets it, for tests), as the GPU's clock is lowered there until the work fills most of the 33 ms
+    {   float lo = 0, th = 0;
+        // Only with DM_DRS_FLOOR set (an opt-in for tests): on Ocarina of Time a lower size cost more than it saved. Each size change makes the game rebuild its textures; at a
+        // 60 fps cap on an M5 its main thread went from 115 to 330-380 ms a second and 100+ frames of 300 dropped, where the fixed size held 60 (L5's drsA, drsB runs). Without
+        // it the render scale fixes the size, as before L5
+        const char *fe = getenv("DM_DRS_FLOOR");
+        if (dyn && fe && sc > 0 && sc <= 1.0f) {
+            float fl = strtof(fe, NULL); if (!(fl >= 0.3f && fl <= 1.0f)) fl = 0.7f;
+            lo = sc * fl; if (lo < 0.25f) lo = 0.25f; if (lo > sc) lo = sc;
+            const char *te = getenv("DM_DRS_THRESHOLD"); th = te ? strtof(te, NULL) : t == 30 ? 166.0f : 0.0f; if (!(th >= 0)) th = 0;
+            LOG("%s: dynamic resolution between %.2f and %.2f of the game's size, load threshold %s%.0f units (DM_DYNAMIC_RESOLUTION, DM_RENDER_SCALE)", g_fps_mod, lo, sc, th > 0 ? "" : "the game's own, ", th > 0 ? th : 83.0f);
+        }
+        memcpy(dm_fps_state + 0x2a0, &lo, sizeof lo); memcpy(dm_fps_state + 0x2a4, &th, sizeof th); }
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9

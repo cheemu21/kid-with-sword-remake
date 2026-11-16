@@ -76,9 +76,6 @@ import Foundation
         expect(mm.rangeLabel(macScale, 1) == "1600 × 900 (100 %)" && mm.rangeLabel(macScale, 0.5) == "800 × 450 (50 %)", "docked size in pixels at 1.0 and 0.5")
         mm.values["DM_OPMODE"] = "0"
         expect(mm.rangeLabel(macScale, 0.75) == "960 × 540 (75 %)", "handheld size in pixels")
-        mm.values["DM_COOL"] = "1"
-        expect(mm.rangeLabel(macScale, 0.75) == "640 × 360 (50 % · Cool Mode)", "Cool mode: the 50 % the game draws at")
-        mm.values["DM_COOL"] = nil
         // a phone's own starting value stands in for the game's default; a setting the phone can't use starts off, whatever was saved
         let dd = UserDefaults(suiteName: "launcher.device.check")!; dd.removePersistentDomain(forName: "launcher.device.check")
         LauncherModel.deviceDefaults["DM_RUMBLE"] = "0"

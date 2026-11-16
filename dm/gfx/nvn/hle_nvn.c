@@ -1781,6 +1781,30 @@ void dm_gfx_suspend(int on) {
     if (on) { dm_vk_drain(); dm_gl_drain(); mtl_drain(); mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); } else LOG("[nvn] graphics resumed");   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames;
     // the pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period
 }
+// kid-with-sword-remake L6.1: a stall watchdog. Once the game has presented 300 frames, a frame count that stays the same for 5 s while graphics are not suspended (the app on the screen)
+// logs every guest thread's wait as it stands (hle_thread.c svc_thread_dump_live, no thread suspended), once per stall; the next stall after frames came back logs again, up to 4 times.
+// An iPhone log (log 44, L6) ended on a picture that stayed stuck with nothing said, so what the game was waiting for was lost; DM_STALL_DUMP=0 turns this off
+static _Atomic uint64_t g_frame;   // (defined below with the frame stats)
+static void *stall_watch(void *p) {
+    (void)p; void svc_thread_dump_live(void);
+    uint64_t last = 0; int still = 0, dumped = 0, n = 0;
+    for (;;) {
+        sleep(1);
+        uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed);
+        pthread_mutex_lock(&g_susp_mu); int susp = g_susp; pthread_mutex_unlock(&g_susp_mu);
+        if (f != last || susp || f < 300) { last = f; still = 0; dumped = 0; continue; }
+        if (++still >= 5 && !dumped && n < 4) {
+            dumped = 1; n++;
+            LOG("[nvn] [RED] stall: no frame for %d s at frame %llu with graphics running: the game's threads as they stand (DM_STALL_DUMP=0 turns this off)", still, (unsigned long long)f);
+            svc_thread_dump_live();
+        }
+    }
+    return NULL;
+}
+__attribute__((constructor)) static void stall_watch_start(void) {
+    const char *e = getenv("DM_STALL_DUMP"); if (e && !strcmp(e, "0")) return;
+    pthread_t th; if (!pthread_create(&th, NULL, stall_watch, NULL)) pthread_detach(th);
+}
 void dm_gfx_quit(int wait_ms) { mtl_arch_save(wait_ms, 1); }
 void dm_gfx_quit_begin(void) { mtl_warm_stop(); mtl_arch_save(0, 0); }   // the end's first step: no more prewarm compiles, and what the archive holds starts writing beside the drain (which can wait on a draw that compiles)
 _Static_assert(DM_QUIT_ARCH_MS == MTL_QUIT_ARCH_MS, "a graceful exit gives the pipeline archive the time a quit does");
@@ -2213,9 +2237,28 @@ static rt_thr *rt_register(const char *name, int acq) {   // on the thread itsel
     rt_thr *t = &g_rtt[i]; rt_init(t, name, acq, rt_self_tid()); return t;
 }
 static int rt_allowed(const rt_thr *t) { return rt_on() && (t->acq || rt_frame_on()); }
+// kid-with-sword-remake L4: the share of the period each thread may declare (DM_RT_SHARE=<acquire>,<frame threads>, default 0.5,0.3 on iOS, 0.9,0.9 elsewhere as nxnative has it).
+// The iPhones this runs on (A17 Pro to A20 Pro) have two performance cores. With nxnative's three declaring threads each allowed 90 % of the period, the iPhone 18 Pro declared
+// 14 + 30 + 20 ms of a 33 ms frame (log 35, measured over the loading frames' peaks): more real-time work than two cores hold, so the game's own workers (ModuleSystemWorker,
+// BaseProcExecutor), which the main thread waits for every frame, ran behind them, and the submit thread took 19 ms of wall clock for 7 ms of CPU. Capped, the three together
+// declare at most 1.1 periods: the deadline still reaches the performance controller, and most of a core stays for the game
+static double rt_share(int acq) {
+    static double a = -1, f = -1;
+    if (a < 0) {
+#if TARGET_OS_IPHONE
+        a = 0.5; f = 0.3;
+#else
+        a = 0.9; f = 0.9;
+#endif
+        const char *e = getenv("DM_RT_SHARE"); double x, y;
+        if (e && sscanf(e, "%lf,%lf", &x, &y) == 2 && x > 0 && x <= 0.9 && y > 0 && y <= 0.9) { a = x; f = y; }
+        LOG("[nvn] time-constraint computation capped at %.2f of the period (acquire thread), %.2f (frame threads) (DM_RT_SHARE)", a, f);
+    }
+    return acq ? a : f;
+}
 static void rt_declare(rt_thr *t, uint64_t period_ns, double comp_ms) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
-    double cap = period_ns * 0.9 / 1e6; if (comp_ms > cap) comp_ms = cap; if (comp_ms < 1) comp_ms = 1;
+    double cap = period_ns * rt_share(t->acq) / 1e6; if (comp_ms > cap) comp_ms = cap; if (comp_ms < 1) comp_ms = 1;
     uint64_t comp_ns = (uint64_t)(comp_ms * 1e6);
     thread_time_constraint_policy_data_t p = {
         .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),

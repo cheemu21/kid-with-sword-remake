@@ -1,5 +1,5 @@
-// The launcher's home (FF11): a title screen over a background picture, a round Play button, one Resolution Scale dial for the render scale and Cool mode, quick tiles for
-// the settings players change most, and an All Settings drawer that slides over the right side with every setting by section, the cloud saves and the background (Look).
+// The launcher's home (FF11, L3): a title screen over a background picture, a round Play button, the Resolution Scale slider, one row of quick tiles for the settings players
+// change most (the frame limit among them), and an All Settings drawer that slides over the right side with every setting by section, the cloud saves and the background (Look).
 // Launcher.swift's LauncherView lays it out and keeps the Play logic (the cloud save check); the rows are LauncherRow.swift's, so the drawer, the in-game menu and the Mac
 // window share one model (LauncherSettings.swift).
 import SwiftUI
@@ -99,56 +99,71 @@ private struct Glass: ViewModifier {
     }
 }
 
-// Resolution Scale: one dial over the render scale and Cool mode. Its steps: Coolest (Cool mode: 3D at 50 % and smaller in-between frames), Cool (50 %), Balanced (60 %),
-// Sharp (70 %), Sharpest (80 %); a render scale between steps shows at the nearest. Without Cool mode in the list it starts at Cool, without a render scale it is not drawn
-struct HeatDial: View {
+// Resolution Scale: the render scale as the All Settings drawer has it (SettingRow's range slider: the setting's own range and step, the size and percentage beside it), on a
+// panel. Named steps over Cool mode were here before (FF11 to L2); the owner wanted the drawer's slider on the home too, and Cool mode went (L3)
+struct ScaleSlider: View {
     @ObservedObject var m: LauncherModel
     let scale: Setting
     var width: CGFloat = 236
-    private static let steps: [(String, Double)] = [("Coolest", 0.5), ("Cool", 0.5), ("Balanced", 0.6), ("Sharp", 0.7), ("Sharpest", 0.8)]
-    private var hasCool: Bool { m.settings.contains { $0.env == "DM_COOL" } }
-    private var lo: Int { hasCool ? 0 : 1 }
-    private var level: Int {
-        if hasCool && m.values["DM_COOL"] == "1" { return 0 }
-        let v = Double(m.values[scale.env] ?? scale.def) ?? 0.6
-        return (1...4).min { abs(Self.steps[$0].1 - v) < abs(Self.steps[$1].1 - v) } ?? 2
-    }
-    private func set(_ l: Int) {
-        let l = max(lo, min(4, l)); guard l != level else { return }
-        if hasCool { m.values["DM_COOL"] = l == 0 ? "1" : "0" }
-        m.values[scale.env] = String(format: "%.2f", Self.steps[l].1)
-        UISelectionFeedbackGenerator().selectionChanged()
+    private var locked: Bool { m.fixed.contains(scale.env) || LauncherModel.unavailable[scale.env] != nil }
+    private var value: Binding<Double> {
+        Binding(get: { Double(m.values[scale.env] ?? scale.def) ?? scale.max ?? 1 },
+                set: { v in let s = String(format: "%.2f", v); if m.values[scale.env] != s { m.values[scale.env] = s; UISelectionFeedbackGenerator().selectionChanged() } })
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Text("Resolution Scale").font(.caption).foregroundStyle(LauncherTheme.soft)
-            HStack(spacing: 8) {
-                GeometryReader { g in
-                    let f = CGFloat(level - lo) / CGFloat(4 - lo), w = g.size.width
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.14)).frame(height: 8)
-                        Capsule().fill(LauncherTheme.gold).frame(width: max(8, w * f), height: 8)
-                        Circle().fill(LauncherTheme.paleGold).frame(width: 20, height: 20).offset(x: (w - 20) * f)
-                    }
-                    .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { v in set(lo + Int((v.location.x / max(w, 1) * CGFloat(4 - lo)).rounded())) })
-                }
-                .frame(height: 22)
-            }
-            HStack {
-                Text(Self.steps[level].0).font(.subheadline.weight(.semibold)).foregroundStyle(LauncherTheme.text)
-                Spacer()
-                Text(m.rangeLabel(scale, Double(m.values[scale.env] ?? scale.def) ?? 0.6)).font(.caption).monospacedDigit().foregroundStyle(LauncherTheme.soft).lineLimit(1).minimumScaleFactor(0.7)
-            }
+            Slider(value: value, in: (scale.min ?? 0.5)...(scale.max ?? 1), step: scale.step ?? 0.05)
+                .tint(LauncherTheme.gold)
+                .accessibilityLabel("Resolution Scale")
+                .accessibilityValue(m.rangeLabel(scale, value.wrappedValue))
+            Text(m.rangeLabel(scale, value.wrappedValue)).font(.caption).monospacedDigit().foregroundStyle(LauncherTheme.text).lineLimit(1).minimumScaleFactor(0.7)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .frame(width: width)
         .modifier(Glass())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Resolution Scale")
-        .accessibilityValue(Self.steps[level].0)
-        .accessibilityAdjustableAction { d in set(level + (d == .increment ? 1 : -1)) }
+        .disabled(locked)
+        .opacity(locked ? 0.45 : 1)
+    }
+}
+
+// Frame Limit: the frame rate cap (a choice setting, DM_FPS_TARGET) as a tile that steps through its options on each tap; lit above the lowest
+struct ChoiceTile: View {
+    @ObservedObject var m: LauncherModel
+    let s: Setting
+    let title: String, icon: String
+    @State private var why = false
+    private var opts: [[String]] { s.options ?? [] }
+    private var cur: String { m.values[s.env] ?? s.def }
+    private var idx: Int { opts.firstIndex { $0[0] == cur } ?? 0 }
+    private var on: Bool { idx > 0 }
+    private var blocked: String? { LauncherModel.unavailable[s.env] ?? (m.fixed.contains(s.env) ? (m.fromLaunch.contains(s.env) ? "Set at launch." : "Set by an env file.") : nil) }
+    var body: some View {
+        Button {
+            if blocked != nil { why = true; return }
+            guard !opts.isEmpty else { return }
+            m.values[s.env] = opts[(idx + 1) % opts.count][0]
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            VStack(alignment: .leading) {
+                HStack(spacing: 4) {
+                    Image(systemName: icon).font(.system(size: 17, weight: .semibold))
+                    Spacer(minLength: 0)
+                    Text(opts.isEmpty ? cur : opts[idx][1]).font(.caption2.weight(.bold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+                }
+                Spacer(minLength: 2)
+                Text(title).font(.caption.weight(.semibold)).multilineTextAlignment(.leading).lineLimit(2).minimumScaleFactor(0.65)
+            }
+            .foregroundStyle(on ? LauncherTheme.paleGold : LauncherTheme.soft)
+            .frame(width: 58, height: 52, alignment: .leading)
+            .padding(9)
+            .modifier(Glass(on: on))
+            .opacity(blocked == nil ? 1 : 0.45)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(opts.isEmpty ? cur : opts[idx][1])
+        .alert(title, isPresented: $why) { Button("OK", role: .cancel) {} } message: { Text(blocked ?? "") }
     }
 }
 
@@ -159,7 +174,10 @@ struct QuickTile: View {
     let title: String, icon: String
     @State private var why = false
     private var on: Bool { (m.values[s.env] ?? s.def) == s.onValue }
-    private var blocked: String? { LauncherModel.unavailable[s.env] ?? (m.fixed.contains(s.env) ? (m.fromLaunch.contains(s.env) ? "Set at launch." : "Set by an env file.") : nil) }
+    private var blocked: String? {
+        LauncherModel.unavailable[s.env] ?? (m.fixed.contains(s.env) ? (m.fromLaunch.contains(s.env) ? "Set at launch." : "Set by an env file.") : nil)
+            ?? (m.visible(s) ? nil : s.env == "DM_FRAMEGEN" ? "Frame Generation works with the 30 fps limit: it shows 60 frames a second by making one between each two the game draws." : "Not used with the current settings.")
+    }
     var body: some View {
         Button {
             if blocked != nil { why = true; return }
@@ -169,10 +187,10 @@ struct QuickTile: View {
             VStack(alignment: .leading) {
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold))
                 Spacer(minLength: 2)
-                Text(title).font(.caption.weight(.semibold)).multilineTextAlignment(.leading).lineLimit(2).minimumScaleFactor(0.8)
+                Text(title).font(.caption.weight(.semibold)).multilineTextAlignment(.leading).lineLimit(2).minimumScaleFactor(0.65)
             }
             .foregroundStyle(on ? LauncherTheme.paleGold : LauncherTheme.soft)
-            .frame(width: 66, height: 52, alignment: .leading)
+            .frame(width: 58, height: 52, alignment: .leading)
             .padding(9)
             .modifier(Glass(on: on))
             .opacity(blocked == nil ? 1 : 0.45)

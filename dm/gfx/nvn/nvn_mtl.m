@@ -8905,7 +8905,10 @@ static _Atomic int g_compact_periods, g_compact_closed, g_compact_bad, g_compact
 // disable the safer original-function capture. A failed flush of this method disables compaction on this OS build until it changes; ordinary archive reads remain available.
 static NSString *arch_compact_marker(void) { return [g_arch_dir stringByAppendingPathComponent:@"compacting"]; }
 static NSString *arch_os_build(void) { char b[64] = ""; size_t n = sizeof b; sysctlbyname("kern.osversion", b, &n, NULL, 0); return [NSString stringWithFormat:@"os\t%s\n", b]; }
-static NSString *arch_compact_stamp(void) { return [arch_os_build() stringByAppendingString:@"capture\toriginal-functions-v1\n"]; }
+// kid-with-sword-remake L6: v2. An iPhone left v1's marker behind when the player left the app during a compaction's write (iOS suspends it, then ends it), which is no crash
+// in Metal, and every start after that kept the files as they were: 186 files, 10.8 GB (log 40). The marker no longer stays for a suspension (mtl_arch_save), and v2 lets
+// a device holding a v1 marker try once more
+static NSString *arch_compact_stamp(void) { return [arch_os_build() stringByAppendingString:@"capture\toriginal-functions-v2\n"]; }
 static int arch_compact_allowed(void) {
     NSString *m = [NSString stringWithContentsOfFile:arch_compact_marker() encoding:NSUTF8StringEncoding error:nil];
     if (!m) return 1;
@@ -9904,7 +9907,9 @@ void mtl_arch_save(int wait_ms, int ending) {
     long late = wait_ms > 0 && arch_harvest_wait(until);
     int n = atomic_load(&g_arch_new);
     arch_hand_over(nil, 1);
-    if (!wait_ms && !ending) return;
+    // Going to the background: a write under way is suspended with the app, and the app may then be ended. That is no crash in Metal, so this run's marker goes now (a later
+    // write sets it again); without this, every start after a player left during a compaction kept its files for good (kid-with-sword-remake L6, logs 37-40)
+    if (!wait_ms && !ending) { os_unfair_lock_lock(&g_mark_lock); if (g_mark_mine) { unlink(arch_compact_marker().fileSystemRepresentation); g_mark_mine = 0; } os_unfair_lock_unlock(&g_mark_lock); return; }
     if (n && wait_ms > 0) MLOG("pipeline archive at exit: writing %d pipelines (up to %d ms)", n, wait_ms);
     late = (wait_ms > 0 && dispatch_group_wait(g_arch_pending, until)) || late;
     if (ending) arch_mark(-1);
@@ -9912,6 +9917,12 @@ void mtl_arch_save(int wait_ms, int ending) {
                         late ? "not all written in time: those left are built again at the next start" : !wait_ms ? "not waited for" : "written", atomic_load(&g_arch_new), (bp_now() - t0) / 1e6);
 }
 static void arch_at_exit(void) { mtl_warm_stop(); mtl_arch_save(MTL_QUIT_ARCH_MS, 1); }
+// The iOS front end's background task (front_ios.m): waits up to ms for the archive's writes handed over (and a compaction they finish), so iOS lets them end before it suspends
+// the app. 1 when all were written
+int mtl_arch_wait_written(int ms) {
+    if (!g_arch_cap || !g_arch_pending) return 1;
+    return dispatch_group_wait(g_arch_pending, dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * NSEC_PER_MSEC)) == 0;
+}
 // What the harvest queue holds captured, then a flush, then every period handed over is written (not on g_arch_q, which writes them, nor on the harvest queue)
 static void arch_flush_wait(void) { arch_harvest_wait(DISPATCH_TIME_FOREVER); arch_flush(); if (g_arch_pending) dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER); }
 static void arch_note_new(void) {   // a base was compiled: flush 10 s later (one flush for a burst of them)
@@ -10629,6 +10640,58 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
         os_unfair_lock_lock(&g_sm_amp_lock); g_sm_amp[i].ps = ps; g_sm_amp[i].done = 1; os_unfair_lock_unlock(&g_sm_amp_lock); });
     return nil;
 }
+// DM_PSO_NOWAIT (default: on in an app, where the prepare step runs; 0: the draw waits, as before): a draw whose pipeline needs a compile and has no stand-in is skipped while a
+// worker builds it (pso_get_)
+static int pso_nowait_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PSO_NOWAIT"); v = e && *e ? atoi(e) != 0 : prepare_on(); if (v) MLOG("pipelines that need a compile and have no stand-in are built in the background, their draws skipped meanwhile (DM_PSO_NOWAIT=0: the draw waits)"); }
+    return v;
+}
+// The pipelines DM_PSO_NOWAIT builds: keyed by the draw's pso_key, NSNull while a worker builds it, the pipeline once built (taken by the next draw of that key, which puts it in
+// g_pso and removes it here), or a failure marker (the draw then builds it itself, for its message). Their own table, not the pending-build table: that table hands a finished slot
+// that no draw took to the next build, so with many builds in flight (a cold cache) a finished pipeline was lost before its draw came back and its draws were skipped for good
+static NSMutableDictionary<NSData *, id> *g_nw; static pthread_mutex_t g_nw_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_nw_cv = PTHREAD_COND_INITIALIZER; static NSNumber *g_nw_failed;
+// The wait: a draw waits for its build up to what is left of the frame's budget (DM_PSO_NOWAIT_MS, default 50 ms a frame, all draws together), then is skipped until it is built.
+// A skipped draw can leave an object half drawn for the frames its compile takes (a pass of its, as the colour or the lighting of a character, missing: the Mac's cold-cache test drew
+// Link as a pale shape), so a compile that ends within the budget is waited for; one that does not (a base compile on a hot iPhone, 0.3-1.0 s) no longer stops the game for it
+static double nw_budget_ms(void) { static double v = -1; if (v < 0) { const char *e = getenv("DM_PSO_NOWAIT_MS"); v = e && *e ? atof(e) : 50; if (!(v >= 0)) v = 50; } return v; }
+static dispatch_queue_t nw_queue(void) {   // the builds' own queue: as many at once as Metal compiles side by side, at user-initiated QoS (a draw is missing meanwhile)
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.pso-nowait", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0)); });
+    return q;
+}
+static id<MTLRenderPipelineState> pso_nw_get(const pso_key *k, NvShader *vs, NvShader *fs, int *fresh) {
+    static dispatch_semaphore_t sem; static dispatch_once_t once; static uint64_t frame = UINT64_MAX, spent_ns;
+    dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
+        sem = dispatch_semaphore_create(pc); g_nw = [NSMutableDictionary dictionary]; g_nw_failed = @0; });
+    NSData *kd = [NSData dataWithBytes:k length:sizeof *k]; *fresh = 0;
+    uint64_t f = atomic_load(&g_cur_frame); if (f != frame) { frame = f; spent_ns = 0; }
+    pthread_mutex_lock(&g_nw_mu); id v = g_nw[kd];
+    if (!v) {
+        g_nw[kd] = NSNull.null; *fresh = 1;
+        MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = !k->border;
+        dispatch_async(nw_queue(), ^{
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+            NSError *e = nil; id<MTLRenderPipelineState> built = pso_build(d, off, &e);
+            dispatch_semaphore_signal(sem);
+            pthread_mutex_lock(&g_nw_mu); g_nw[kd] = built ? built : g_nw_failed; pthread_cond_broadcast(&g_nw_cv); pthread_mutex_unlock(&g_nw_mu);
+        });
+        v = NSNull.null;
+    }
+    uint64_t budget = (uint64_t)(nw_budget_ms() * 1e6);
+    if (v == NSNull.null && spent_ns < budget) {   // wait for it within what is left of this frame's budget
+        uint64_t t0 = bp_now(), until = t0 + (budget - spent_ns);
+        struct timeval tv; gettimeofday(&tv, NULL);
+        uint64_t wall = (uint64_t)tv.tv_sec * 1000000000ull + (uint64_t)tv.tv_usec * 1000ull + (budget - spent_ns);
+        struct timespec ts = {(time_t)(wall / 1000000000ull), (long)(wall % 1000000000ull)};
+        while ((v = g_nw[kd]) == NSNull.null && bp_now() < until) if (pthread_cond_timedwait(&g_nw_cv, &g_nw_mu, &ts)) break;
+        v = g_nw[kd]; spent_ns += bp_now() - t0;
+    }
+    if (v && v != NSNull.null) [g_nw removeObjectForKey:kd];   // built (the draw puts it in g_pso), or failed (its draw builds it and reports the failure)
+    pthread_mutex_unlock(&g_nw_mu);
+    if (v == g_nw_failed) { *fresh = -1; return nil; }
+    return v == NSNull.null ? nil : v;
+}
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) {
     (void)unused;
     g_pso_pull = 0;   // set again only where a pulling pipeline is returned: a stale 1 made the next draw, whose pipeline came from the cache, bind the layout block instead of its streams
@@ -10680,6 +10743,20 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (pso_predict_due(st == 0)) { uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
                     return h;
+                }
+                // kid-with-sword-remake L5: no stand-in either (the pair's pulling base is not made yet, or the vertex shader has none): the draw's pipeline is built in the
+                // background and the draw is skipped until it is there, as a task / mesh draw is (DM_MESH_ASYNC). Before, the draw waited for the compile on the submit thread:
+                // an iPhone 18 Pro in its serious thermal state compiled a base in 0.3-1.0 s (log 36: 19 in 15.7 s), and frames of 361, 570, 982 and 472 ms were such waits
+                if (pso_nowait_on()) {
+                    int fresh = 0; id<MTLRenderPipelineState> got = pso_nw_get(&k, vs, fs, &fresh);
+                    if (got) { ps = got; took = 1; }
+                    else if (fresh >= 0) {
+                        static uint64_t skips; static int lg = 24;
+                        if (fresh && lg > 0) { lg--; MLOG("pipeline not built yet: vertex %s fragment %s is built in the background, its draws skipped meanwhile (%s)", vs->key, fs ? fs->key : "-", g_pw_why[why]); }
+                        if (!(++skips & (skips - 1)) && skips >= 1024) MLOG("draws skipped for a pipeline in the background: %llu so far", (unsigned long long)skips);
+                        g_hy_ns += bp_now() - bt;
+                        return nil;
+                    }
                 }
             }
         }
@@ -16974,7 +17051,9 @@ static int up_mfx_encode(NvShader *cs) {
     for (int i = 0; i < cs->rf.nb; i++) { int k = cs->rf.b[i].kind; if (k == NVN_RB_TEX && ti < 0) ti = i; else if (k == NVN_RB_IMG && oi < 0) oi = i; else if (k == NVN_RB_TEX || k == NVN_RB_IMG) return 0; }
     if (ti < 0 || oi < 0) { static int once; if (!once++) MLOG("[RED] upscaler %s: not one texture and one image; the shader draws", cs->key); return 0; }
     int tin = (int)(bound_tex(5, cs->rf.b[ti].reg) & 0xfffff), tout = cs->rf.b[oi].reg < 32 ? (int)(bound_img(5, cs->rf.b[oi].reg) & 0xfffff) : 0;
-    if (g_up_chain_in && up_chain_role(cs) == 3) tin = g_up_chain_in;   // a chain: the first stage's colour, the stages between skipped
+    // kid-with-sword-remake L5: any shader that ends the chain, not only the profile's listed last stages. One taken as the last stage because it follows the skipped stages
+    // (7c511cc23ff85d14 at a 1046x480 view, which Dynamic Resolution reaches) read its own input, which those stages never wrote: a black picture
+    if (g_up_chain_in) tin = g_up_chain_in;   // a chain: the first stage's colour, the stages between skipped
     tex_t dout = {0}; id<MTLTexture> in, out;
     os_unfair_lock_lock(&g_rmu);
     int ok = tin > 0 && tin < g_ntreg && g_treg[tin].ok && tout > 0 && tout < g_ntreg && g_treg[tout].ok;
@@ -16991,7 +17070,10 @@ static int up_mfx_encode(NvShader *cs) {
     if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
         fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !up_mfx_rect(v, in.width, in.height, &ir) || !up_mfx_rect(v + 4, out.width, out.height, &orr) ||
         orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height)) { g_up_mfx_kept++; return 0; }
-    int srgb = cs->up_color == UP_COLOR_SRGB && !(g_up_chain_in && up_chain_role(cs) == 3), root = cs->up_color == UP_COLOR_ROOT;   // a chain's colour: the scene's linear HDR (R11G11B10F)
+    int chain = g_up_chain_in != 0;   // a chain's colour: the scene's linear HDR (R11G11B10F), whatever the last stage's own input is
+    // kid-with-sword-remake L4: the merge of nxnative's colour shapes (UP_COLOR_ROOT) squared the chain's linear colour too, when the last stage reads square roots (b106afba1a18faa9 at
+    // render scale 0.6), which made the picture dark (log 35); the chain's input is the first stage's, already linear, so it is neither decoded nor squared
+    int srgb = cs->up_color == UP_COLOR_SRGB && !chain, root = cs->up_color == UP_COLOR_ROOT && !chain;
     // Each side is the game's own texture when MetalFX can take it as it is: the rectangle is the whole texture (MetalFX reads and writes from the origin) and the format is not sRGB (as the
     // copies, which keep its decode). The input in any format MetalFX takes, unless it is square-rooted: only the copy squares it (COPY_T2T_SQUARE). The output, private, only in the
     // scaler's own: MetalFX's own writes of R11G11B10F come out about two steps of its mantissa low (2.0 as 1.94, 0.5 as 0.484), where its RGBA16F output drawn back gives 1.98 and 0.496
