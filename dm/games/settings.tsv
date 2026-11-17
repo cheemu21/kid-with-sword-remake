@@ -40,6 +40,6 @@ DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn&platform:mac	Performanc
 DM_PSO_MTL4	toggle	-	DM_GAME_PSO_MTL4|1	gfxapi:nvn&platform:mac	Performance	Metal 4 Pipelines	Keeps a pipeline archive; uses more memory.
 DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn&platform:mac	Performance	Pipeline Prebuild	The first start waits a few minutes for it, once.	needs=DM_PSO_MTL4=1
 DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn&platform:mac	Performance	Encode Thread
-DM_NVN_TEX_MIP_SKIP	toggle	512/0	0	gfxapi:nvn	Performance	Texture Memory Saver	Large textures are made without their sharpest detail level: about a quarter of their memory and shorter area loads, slightly softer up close. On by default on iPhones with 8 GB of memory.
+DM_NVN_TEX_MIP_SKIP	toggle	512/0	1|0	gfxapi:nvn	Performance	Texture Memory Saver	Large textures are made without their sharpest detail level: about a quarter of their memory and shorter area loads, slightly softer up close. On by default on iPhone.
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0	Performance	Hold Frames When Late
 DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD
