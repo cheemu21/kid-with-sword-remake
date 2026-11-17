@@ -58,10 +58,10 @@ The shaders are built with Xcode 27.2's Metal compiler: select it first with `su
 **3. Save the build settings** below as `env.txt`, then **build**:
 
 ```
-python3 scripts/build_ipa_from_nsp.py ~/Games/OcarinaOfTime --romfs separate --env-file env.txt --icon icon.png
+python3 scripts/build_ipa_from_nsp.py ~/Games/OcarinaOfTime --romfs separate --env-file env.txt
 ```
 
-`--icon` takes any JPEG or PNG for the home-screen icon; a dump folder has none of its own, so without it the icon is blank.
+The app gets the port's icon (`dm/games/0400486024DEC000/icon.png`), as a dump folder has none of its own. To use another picture, add `--icon <image>` (any JPEG or PNG).
 
 The IPA appears in the game's folder. The first build compiles about 43,000 shaders and takes one to two hours; building again reuses them and takes minutes.
 

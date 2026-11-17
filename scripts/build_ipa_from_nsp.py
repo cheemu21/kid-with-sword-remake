@@ -3416,9 +3416,12 @@ def main(args=None):
     # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
+    # A profile's own stand-in icon (dm/games/<id>/icon.png), when no --fallback-icon / FALLBACK_ICON names one: as a fallback, it never replaces a game's own icon, and a dump
+    # folder or a NUP without one gets it instead of a blank icon (kid-with-sword-remake: Ocarina of Time's)
+    if not spare_icon and g and (repo / 'dm/games' / g.id / 'icon.png').is_file(): spare_icon = (repo / 'dm/games' / g.id / 'icon.png').resolve()
     icon, stand_in = app_icon(user_icon, spare_icon, game, base)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
-        if stand_in: say(f'no game icon: the app takes the fallback icon {spare_icon} (--fallback-icon / FALLBACK_ICON)')
+        if stand_in: say(f'no game icon: the app takes the fallback icon {spare_icon} (--fallback-icon / FALLBACK_ICON, else the profile\'s icon.png)')
         say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, icon)
     # the game language: Horizon gives the game one of the languages its control data lists (the packed version's, which an update may extend), so the one packed must be among them
     control = languages_control(game, base)
