@@ -1,24 +1,68 @@
-# Kid with Sword Remake
+<p align="center">
+  <img src="docs/images/kid-with-sword-remake-icon.png" width="160" alt="Kid with Sword Remake app icon: a snow-leopard cat dressed as Link">
+</p>
 
-**The Legend of Zelda: Ocarina of Time (Nintendo Switch 2 Edition) as a native iPhone app**, built on [nxnative](https://github.com/seedds/nxnative).
+<h1 align="center">Kid with Sword Remake</h1>
 
-It is not an emulator: the game's own code runs directly on the iPhone's chip, with its graphics rebuilt on Metal. Nothing from the game is in this repository or in any release: you build the app yourself from your own copy of the game. Not affiliated with Nintendo.
+<p align="center">
+  <b>The Legend of Zelda: Ocarina of Time (Nintendo Switch 2 Edition) as a native iPhone and Mac app</b><br>
+  built on <a href="https://github.com/seedds/nxnative">nxnative</a>
+</p>
 
-[Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) · [Features](#features) · [Requirements](#requirements) · [Build](#build) · [Install and play](#install-and-play) · [Best settings](#best-settings) · [Known issues](#known-issues) · [Credits](#credits) · [Acknowledgements](#acknowledgements)
+<p align="center">
+  <a href="https://github.com/cheemu21/kid-with-sword-remake/releases"><img src="https://img.shields.io/github/v/release/cheemu21/kid-with-sword-remake?include_prereleases&label=latest&color=2e7d32" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/iOS-26%2B-000000?logo=apple" alt="iOS 26 or later">
+  <img src="https://img.shields.io/badge/macOS-Apple%20silicon-000000?logo=apple" alt="macOS on Apple silicon">
+  <img src="https://img.shields.io/badge/graphics-Metal%204-1565c0" alt="Metal 4">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-c9a227" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/cheemu21/kid-with-sword-remake/releases">Releases</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#requirements">Requirements</a> ·
+  <a href="#build">Build</a> ·
+  <a href="#install-and-play">Install and play</a> ·
+  <a href="#mac-app">Mac app</a> ·
+  <a href="#best-settings">Best settings</a> ·
+  <a href="#known-issues">Known issues</a> ·
+  <a href="#credits">Credits</a>
+</p>
+
+> [!NOTE]
+> **Not an emulator.** The game's own code runs directly on the Apple chip, with its graphics rebuilt on Metal. Nothing from the game is in this repository or in any release: you build the app yourself from your own copy of the game. Not affiliated with Nintendo.
 
 ## Latest: L6.3 (pre-release)
 
 The latest nxnative engine with this port's iPhone fixes on top: the white screen after pulling the Master Sword fixed, and no more once-a-second hitches after an area change. Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for what changed in each build.
 
+**Coming in the next build (in testing now):**
+
+- **A Mac app with the same launcher as the iPhone**, made for the Mac: a resizable window, keyboard shortcuts and your own background picture. See [Mac app](#mac-app).
+- **A simpler iPhone launcher.** Settings that only slow the game down on a phone are now hidden there: Upscaling, Dynamic Resolution, Game's Upscaler (the iPhone always uses MetalFX), Metal 4 pipelines, Pipeline prebuild and the encoder thread. They stay on the Mac, and Wide view stays on both.
+
 ## Features
+
+| | |
+|---|---|
+| ⚔️ **Native speed** | The game's code runs on the Apple chip; pipelines are built once, then it starts in about 3 seconds |
+| 🎞️ **Frame generation** | 30 frames drawn, 60 shown, with MetalFX's frame interpolator |
+| 🔍 **MetalFX upscaling** | In place of the game's own upscaler, which cost a phone 5–10 ms a frame |
+| 📱 **Wide view** | Fills the iPhone's screen at its own shape, nothing stretched |
+| 🎵 **Ocarina with your microphone** | Hum or whistle the notes into your iPhone's microphone to play the ocarina |
+| 🛡️ **Amiibo** | From a list, a real figure over NFC, or Shortcuts |
+| 💻 **Mac app** | The same launcher, made for the Mac |
+
+In detail:
 
 - **Native speed on iPhone.** The game's code runs on the Apple chip; its shaders are translated ahead of time and its pipelines are built once on the phone, then started in about 3 seconds.
 - **Frame generation.** The game draws 30 frames a second and the screen shows 60, with MetalFX's frame interpolator. It never falls back to 30 in play, pauses in the game's menus, and keeps the HUD sharp.
 - **60 fps** on an iPhone 18 Pro while the phone is cool.
 - **MetalFX upscaling** in place of the game's own upscaler, which cost the phone 5–10 ms a frame.
 - **Wide view.** The game fills the iPhone's screen at its own shape, with nothing stretched.
-- **A launcher** with the frame limit, frame generation, Wide view, the Ocarina microphone, the Performance HUD and a Render Scale slider on its main screen, and every other setting under All Settings.
-- **Play the ocarina with your voice** through the iPhone's microphone.
+- **A launcher** with the frame limit, frame generation, Wide view, the Ocarina microphone, the Performance HUD and a Render Scale slider on its main screen, and every other setting under All Settings. The iPhone only shows the settings that help a phone.
+- **A Mac app** with the same launcher, for Apple silicon Macs.
+- **Play the ocarina with your iPhone's microphone.** Hum or whistle the notes and the game hears them, like playing the ocarina for real. Turn on **Microphone** in the launcher (off by default); iOS asks for the microphone once. iPhone only.
 - **Amiibo**: pick one from an in-game list, scan a real figure with the iPhone's NFC reader, or tap one through Shortcuts in LiveContainer.
 - **Touch controls**, and any controller iOS supports.
 - **No long freezes when a new shader appears**: a new pipeline gets at most 50 ms of a frame, and is built in the background after that.
@@ -67,6 +111,8 @@ The IPA appears in the game's folder. The first build compiles about 43,000 shad
 
 ### Build settings
 
+Save these lines as `env.txt`:
+
 ```
 DM_UPSCALER=metalfx
 DM_FPS_HOLD=off
@@ -87,15 +133,33 @@ DM_GUEST_FILE=1
 
 Controls, saves and settings: [Playing](docs/playing.md).
 
+## Mac app
+
+The same game as a double-clickable Mac app, for Apple silicon Macs. It uses the same game folder and the same launcher as the iPhone: the Render Scale slider, Frame Limit, Frame Generation, Wide view, the Performance HUD and Display Mode (window or full screen) are on its main screen, and every setting is under **All Settings**, including the Mac-only ones.
+
+Build it after step 1 of [Build](#build):
+
+```
+python3 scripts/build_ipa_from_nsp.py ~/Games/OcarinaOfTime --platform mac-app --env-file env.txt -o ~/Desktop/"Kid with Sword Remake.app"
+```
+
+The Mac build compiles its own shaders and makes the pipelines for your Mac's GPU, so the first build takes a while. It does not need Xcode's iOS platform. On the same disk as the build, the app's game files are APFS clones and take almost no extra space.
+
+- **Your own background picture:** set `DM_LAUNCHER_BG=<image>` (and `DM_LAUNCHER_TITLE=<title>` for the title) when you build, or pick one later under All Settings → **Look** → **Choose a File…**.
+- **Keyboard:** Return plays, ⌘, opens All Settings, Esc closes it.
+- **Show this window at launch:** turn it off to go straight into the game; hold Option while opening the app to see the launcher again.
+- The app is signed ad-hoc, so it opens on the Mac that built it. Copied to another Mac, macOS may block it: allow it under System Settings → Privacy & Security → **Open Anyway**.
+
 ## Best settings
 
 | Setting | Value |
 |---|---|
-| Game's Upscaler | **MetalFX** ("Game's own" runs the game's AI upscaler and cannot hold 30 fps on a phone) |
-| Upscaling | **Standard** |
 | Render Scale | **0.5–0.6** (lower barely helps: this game's cost is mostly geometry) |
 | Frame Limit | **30 with Frame Generation**, or **60** while the phone is cool |
-| Dynamic Resolution | Off (it costs this game more than it saves) |
+| Wide view | Your choice: it costs little |
+| Performance HUD | Off unless you are measuring |
+
+The iPhone launcher already hides the settings that would make it slower, and uses MetalFX for the game's upscaler. On the Mac, keep **Game's Upscaler** on MetalFX, **Upscaling** on Standard and **Dynamic Resolution** off.
 
 Start with a cool phone: when iOS reports the phone as hot, it halves the CPU's clock and frames drop.
 
