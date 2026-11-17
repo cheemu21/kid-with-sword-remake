@@ -1,10 +1,47 @@
 // The launcher's home (FF11, L3): a title screen over a background picture, a round Play button, the Resolution Scale slider, one row of quick tiles for the settings players
 // change most (the frame limit among them), and an All Settings drawer that slides over the right side with every setting by section, the cloud saves and the background (Look).
 // Launcher.swift's LauncherView lays it out and keeps the Play logic (the cloud save check); the rows are LauncherRow.swift's, so the drawer, the in-game menu and the Mac
-// window share one model (LauncherSettings.swift).
+// window share one model (LauncherSettings.swift). The Mac app's window lays out the same views (dm/mac/Launcher.swift MacHomeView, kid-with-sword-remake): what differs by platform
+// (the picture type, haptics, where a chosen picture is kept, the list style) is in the #if blocks here
 import SwiftUI
 import PhotosUI
+#if canImport(UIKit)
 import UIKit
+typealias LauncherImage = UIImage
+#else
+import AppKit
+import ImageIO
+import UniformTypeIdentifiers
+typealias LauncherImage = NSImage
+#endif
+
+extension Image {
+    init(launcher i: LauncherImage) {
+#if canImport(UIKit)
+        self.init(uiImage: i)
+#else
+        self.init(nsImage: i)
+#endif
+    }
+}
+// A light tap under the finger on an iPhone; nothing on a Mac
+func launcherTap() {
+#if os(iOS)
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+#endif
+}
+func launcherTick() {
+#if os(iOS)
+    UISelectionFeedbackGenerator().selectionChanged()
+#endif
+}
+let launcherDevice: String = {
+#if os(iOS)
+    return "iPhone"
+#else
+    return "Mac"
+#endif
+}()
 
 // The launcher's colours: a night forest with gold for what is on
 enum LauncherTheme {
@@ -24,21 +61,39 @@ enum LauncherTheme {
 // (build_ipa.sh DM_LAUNCHER_BG → dm/launcher_background.jpg, a player's own build only), else none (the drawn forest)
 enum LauncherBackgroundStore {
     static var packedDir: URL? = Bundle.main.resourceURL?.appendingPathComponent("dm")   // the running program's dm folder (Launcher.swift sets it)
+#if os(iOS)
     static var imported: URL? { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("launcher_background.jpg") }
+#else
+    // the Mac app's own folder in Application Support (its bundle identifier), not the player's Documents
+    static var imported: URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let d = base.appendingPathComponent(Bundle.main.bundleIdentifier ?? "nxnative-game", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d.appendingPathComponent("launcher_background.jpg")
+    }
+#endif
     static var hasImported: Bool { imported.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
-    static func image() -> UIImage? {
+    static func image() -> LauncherImage? {
         for u in [imported, packedDir?.appendingPathComponent("launcher_background.jpg")].compactMap({ $0 }) where FileManager.default.fileExists(atPath: u.path) {
-            if let i = UIImage(contentsOfFile: u.path) { return i }
+            if let i = LauncherImage(contentsOfFile: u.path) { return i }
         }
         return nil
     }
     // A picked photo, at most 2400 px on its long side, as a JPEG: a 48 MP photo would otherwise take about 190 MB of memory each time the launcher draws it
     static func save(_ data: Data) -> Bool {
+#if canImport(UIKit)
         guard let img = UIImage(data: data), let u = imported else { return false }
         let s = img.size, k = min(1, 2400 / max(s.width, s.height, 1)), size = CGSize(width: (s.width * k).rounded(), height: (s.height * k).rounded())
         let format = UIGraphicsImageRendererFormat(); format.scale = 1
         let out = UIGraphicsImageRenderer(size: size, format: format).image { _ in img.draw(in: CGRect(origin: .zero, size: size)) }
         guard let jpg = out.jpegData(compressionQuality: 0.88) else { return false }
+#else
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil), let u = imported,
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 2400,
+                                                                  kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return false }
+        let size = CGSize(width: cg.width, height: cg.height)
+        guard let jpg = NSBitmapImageRep(cgImage: cg).representation(using: .jpeg, properties: [.compressionFactor: 0.88]) else { return false }
+#endif
         do { try jpg.write(to: u, options: .atomic); fputs("launcher: background picture saved (\(Int(size.width))x\(Int(size.height)))\n", stderr); return true }
         catch { fputs("[RED] launcher: background picture not saved: \(error.localizedDescription)\n", stderr); return false }
     }
@@ -46,17 +101,17 @@ enum LauncherBackgroundStore {
     // The title over the picture: dm/launcher_title.txt (build_ipa.sh DM_LAUNCHER_TITLE), else the app's name
     static func title() -> String {
         if let u = packedDir?.appendingPathComponent("launcher_title.txt"), let t = try? String(contentsOf: u, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
-        return (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? "Game"
+        return (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? "Game"
     }
 }
 
 // The background: the picture, filling the screen, under two shades that keep the title (left) and the controls (bottom) readable; without one, a drawn night forest
 struct LauncherBackdrop: View {
-    let image: UIImage?
+    let image: LauncherImage?
     var body: some View {
         ZStack {
             if let image {
-                GeometryReader { g in Image(uiImage: image).resizable().scaledToFill().frame(width: g.size.width, height: g.size.height).clipped() }
+                GeometryReader { g in Image(launcher: image).resizable().scaledToFill().frame(width: g.size.width, height: g.size.height).clipped() }
             } else {
                 ForestBackdrop()
             }
@@ -108,7 +163,7 @@ struct ScaleSlider: View {
     private var locked: Bool { m.fixed.contains(scale.env) || LauncherModel.unavailable[scale.env] != nil }
     private var value: Binding<Double> {
         Binding(get: { Double(m.values[scale.env] ?? scale.def) ?? scale.max ?? 1 },
-                set: { v in let s = String(format: "%.2f", v); if m.values[scale.env] != s { m.values[scale.env] = s; UISelectionFeedbackGenerator().selectionChanged() } })
+                set: { v in let s = String(format: "%.2f", v); if m.values[scale.env] != s { m.values[scale.env] = s; launcherTick() } })
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -143,7 +198,7 @@ struct ChoiceTile: View {
             if blocked != nil { why = true; return }
             guard !opts.isEmpty else { return }
             m.values[s.env] = opts[(idx + 1) % opts.count][0]
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            launcherTap()
         } label: {
             VStack(alignment: .leading) {
                 HStack(spacing: 4) {
@@ -182,7 +237,7 @@ struct QuickTile: View {
         Button {
             if blocked != nil { why = true; return }
             m.values[s.env] = on ? s.offValue : s.onValue
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            launcherTap()
         } label: {
             VStack(alignment: .leading) {
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold))
@@ -213,13 +268,16 @@ struct LookSection: View {
             PhotosPicker(selection: $pick, matching: .images) {
                 Label(has ? "Choose a Different Picture" : "Choose Picture", systemImage: "photo.on.rectangle")
             }
+#if os(macOS)
+            Button { chooseFile() } label: { Label("Choose a File…", systemImage: "folder") }
+#endif
             if has {
                 Button(role: .destructive) { LauncherBackgroundStore.remove(); has = false; note = "Back to the default background."; changed() } label: {
                     Label("Use Default Background", systemImage: "arrow.uturn.backward")
                 }
             }
         } header: { Text("Background") } footer: {
-            Text(note.isEmpty ? "A picture from your library behind the launcher. It stays on this iPhone." : note)
+            Text(note.isEmpty ? "A picture from your library behind the launcher. It stays on this \(launcherDevice)." : note)
         }
         .onChange(of: pick) { _, item in
             guard let item else { return }
@@ -230,6 +288,16 @@ struct LookSection: View {
             }
         }
     }
+#if os(macOS)
+    // A picture from the Mac's files (Finder), beside the Photos library
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = false; panel.prompt = "Use as Background"
+        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) else { return }
+        let ok = LauncherBackgroundStore.save(data)
+        has = LauncherBackgroundStore.hasImported; note = ok ? "Saved." : "That picture couldn't be used. Try another one."; if ok { changed() }
+    }
+#endif
 }
 
 // All Settings: a drawer over the right side with the list's sections, then Saves (cloud saves, memory) and Look (the background)
@@ -261,7 +329,7 @@ struct AllSettingsDrawer: View {
                     LookSection(changed: backgroundChanged).listRowBackground(LauncherTheme.row)
                 default:
                     Section { ForEach(m.rows(in: current)) { SettingRow(s: $0, m: m) } }.listRowBackground(LauncherTheme.row)
-                    if current == "Performance" {
+                    if current == "Performance" && memory > 0 {
                         Section {
                             HStack { Text("Memory Available"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary) }
                         }
@@ -273,8 +341,7 @@ struct AllSettingsDrawer: View {
                     .listRowBackground(LauncherTheme.row)
                 }
             }
-            .listStyle(.insetGrouped)
-            .listSectionSpacing(.compact)
+            .launcherListStyle()
             .listRowSeparatorTint(LauncherTheme.line)
             .scrollContentBackground(.hidden)
             .contentMargins(.horizontal, 0, for: .scrollContent)
@@ -303,6 +370,17 @@ struct AllSettingsDrawer: View {
         .fixedSize()
     }
 
+}
+
+extension View {
+    // the drawer's list: grouped on an iPhone, inset on a Mac (no grouped list style there)
+    @ViewBuilder func launcherListStyle() -> some View {
+#if os(iOS)
+        self.listStyle(.insetGrouped).listSectionSpacing(.compact)
+#else
+        self.listStyle(.inset)
+#endif
+    }
 }
 
 // When the game was last saved: the newest file in the save folder (DM_SAVE), "Today at 9:41 PM"

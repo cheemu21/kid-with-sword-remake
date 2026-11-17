@@ -117,62 +117,117 @@ enum SaveCheck {
     }
 }
 
+// The Mac launcher (kid-with-sword-remake): the iPhone launcher's home (LauncherHome.swift: the background picture, the title, a round Play button, the Resolution Scale slider,
+// the quick tiles and the All Settings drawer) in a wide window, made for a Mac: Return plays, ⌘, opens All Settings and Esc closes it, the tiles say what they do on hover, the
+// Display Mode tile (window or full screen) stands where the iPhone has its microphone, and Look takes a picture from the Finder too. "Show this window at launch" stays, under Play
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let done: (Bool) -> Void
-    let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
-    @AppStorage("window.advanced") private var advanced = false
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
+    @State private var drawer = false
+    @State private var background = LauncherBackgroundStore.image()
+    @State private var statusLine = ""
+    private static let limitTile = ("DM_FPS_TARGET", "Frame Limit", "speedometer")
+    private static let modeTile = ("DM_FULLSCREEN", "Display Mode", "macwindow")
+    private static let tiles = [("DM_FRAMEGEN", "Frame Generation", "waveform.path"), ("DM_WIDE_VIEW", "Wide View", "arrow.left.and.right"), ("DM_MIC", "Ocarina Mic", "mic"), ("DM_METAL_HUD", "Performance HUD", "gauge.with.dots.needle.33percent")]
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
-                }
-                Spacer()
+        ZStack {
+            LauncherBackdrop(image: background)
+            ZStack {
+                titleBlock
+                sideButtons
+                bottomBar
             }
-            .padding([.horizontal, .top], 20)
-            Form {
-                settingSections(basic: true)
-                CloudSavesSection()
-                Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                }
-                if advanced {
-                    settingSections(basic: false)
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
-                    }
-                }
-            }
-            .formStyle(.grouped)
-            .onScrollGeometryChange(for: CGFloat.self) {
-                $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom - $0.containerSize.height
-            } action: { _, extraHeight in
-                fit(extraHeight)
-            }
-            HStack {
-                Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
-                Spacer()
-                if checking {
-                    ProgressView().controlSize(.small)
-                    Text("Checking the cloud save…").foregroundStyle(.secondary)
-                    Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }
-                }
-                Button("Quit") { done(false) }
-                Button("Play") { start() }.keyboardShortcut(.defaultAction).disabled(checking)
-            }
-            .padding(20)
+            .padding(.horizontal, 32).padding(.top, 36).padding(.bottom, 26)   // the title bar is transparent: the picture runs under it
         }
-        .frame(minWidth: 520, idealWidth: 560)
+        .overlay(alignment: .trailing) { drawerOverlay }
+        .environment(\.colorScheme, .dark)
+        .frame(minWidth: 860, minHeight: 500)
+        .background(alignment: .topLeading) {   // ⌘, toggles the drawer (a hidden button carries the shortcut)
+            Button("") { toggleDrawer() }.keyboardShortcut(",", modifiers: .command).opacity(0).allowsHitTesting(false)
+        }
+        .task { statusLine = [launcherLastPlayed(), cloudLine()].compactMap { $0 }.joined(separator: " · ") }
+    }
+
+    private func cloudLine() -> String? {
+        let env = getenv("DM_SAVE_SYNC").map { String(cString: $0) }
+        let folder = env ?? (UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? "")
+        return folder.isEmpty || folder == "0" ? nil : "Cloud Saves On"
+    }
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Continue Your Journey").font(.callout).foregroundStyle(LauncherTheme.soft)
+            Text(LauncherBackgroundStore.title()).font(.system(size: 40, weight: .bold)).foregroundStyle(LauncherTheme.text)
+                .shadow(color: .black.opacity(0.5), radius: 10, y: 2).lineLimit(1).minimumScaleFactor(0.6)
+            Text(statusLine).font(.callout).foregroundStyle(LauncherTheme.soft).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+    private var sideButtons: some View {
+        VStack(spacing: 12) {
+            playButton
+            Button { toggleDrawer() } label: {
+                Label("All Settings", systemImage: "slider.horizontal.3").font(.callout.weight(.semibold)).foregroundStyle(LauncherTheme.text)
+                    .padding(.horizontal, 16).padding(.vertical, 9)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(LauncherTheme.paleGold.opacity(0.3), lineWidth: 1))
+            }
+            .buttonStyle(.plain).help("All Settings (⌘,)")
+            Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox).font(.caption).foregroundStyle(LauncherTheme.soft)
+                .help("Off: the game starts at once. Hold Option while opening the app to see this window again.")
+            Button("Quit") { done(false) }.buttonStyle(.plain).font(.caption).foregroundStyle(LauncherTheme.soft)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+    private var tileSettings: [(Setting, String, String)] {
+        Self.tiles.compactMap { t in m.settings.first(where: { $0.env == t.0 && $0.kind == "toggle" }).map { ($0, t.1, t.2) } }
+    }
+    private func choice(_ t: (String, String, String)) -> Setting? { m.settings.first { $0.env == t.0 && $0.kind == "choice" && ($0.options?.count ?? 0) > 1 } }
+    private var bottomBar: some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            if let scale = m.settings.first(where: { $0.env == "DM_RENDER_SCALE" }) { ScaleSlider(m: m, scale: scale, width: 260) }
+            if let l = choice(Self.limitTile) { ChoiceTile(m: m, s: l, title: Self.limitTile.1, icon: Self.limitTile.2).help("Frame Limit: click to switch") }
+            ForEach(tileSettings, id: \.0.env) { t in QuickTile(m: m, s: t.0, title: t.1, icon: t.2).help(t.1 + ": click to turn on or off") }
+            if let d = choice(Self.modeTile) { ChoiceTile(m: m, s: d, title: Self.modeTile.1, icon: Self.modeTile.2).help("Display Mode: a window or full screen") }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+    }
+    private func toggleDrawer() { withAnimation(.easeOut(duration: 0.22)) { drawer.toggle() } }
+    @ViewBuilder private var drawerOverlay: some View {
+        if drawer {
+            HStack(spacing: 0) {
+                Color.black.opacity(0.001).onTapGesture { toggleDrawer() }
+                AllSettingsDrawer(m: m, close: toggleDrawer, backgroundChanged: { background = LauncherBackgroundStore.image() }, memory: 0)
+                    .frame(width: 440)
+                    .overlay(alignment: .topTrailing) { Button("") { toggleDrawer() }.keyboardShortcut(.cancelAction).opacity(0).allowsHitTesting(false) }   // Esc
+            }
+            .transition(.move(edge: .trailing))
+        }
+    }
+    @ViewBuilder private var playButton: some View {
+        Button(action: start) {
+            Image(systemName: "play.fill").font(.system(size: 44, weight: .bold)).foregroundStyle(LauncherTheme.onGold).offset(x: 3)
+                .frame(width: 120, height: 120)
+                .background(LauncherTheme.gold, in: Circle())
+                .overlay(Circle().strokeBorder(LauncherTheme.paleGold, lineWidth: 4))
+                .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.defaultAction)
+        .disabled(checking)
+        .help("Play (Return)")
+        .accessibilityLabel("Play")
+        if checking {
+            VStack(spacing: 6) {
+                HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Checking the Cloud Save…").font(.callout).foregroundStyle(LauncherTheme.soft) }
+                Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }.buttonStyle(.plain).font(.callout).foregroundStyle(LauncherTheme.paleGold)
+            }
+        } else {
+            Text("Play").font(.title3.weight(.semibold)).foregroundStyle(LauncherTheme.paleGold).shadow(color: .black.opacity(0.6), radius: 6)
+        }
     }
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
@@ -188,17 +243,6 @@ struct LauncherView: View {
                 case .play(let choice): SaveCheck.apply(choice); done(true)
                 case .retry: start()
                 case .cancel: break   // back to the window, nothing chosen
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private func settingSections(basic: Bool) -> some View {
-        ForEach(m.sections(basic: basic), id: \.self) { section in
-            let rows = m.rows(in: section, basic: basic)
-            if !rows.isEmpty {
-                Section(section) {
-                    ForEach(rows) { SettingRow(s: $0, m: m) }
                 }
             }
         }
@@ -263,17 +307,16 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        // a wide window, the picture under a transparent title bar (kid-with-sword-remake: the iPhone launcher's look, LauncherView above)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
-        w.contentMinSize = NSSize(width: 520, height: 0)
+        w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden; w.isMovableByWindowBackground = true
+        w.appearance = NSAppearance(named: .darkAqua)   // dark whatever the Mac's appearance, as on the iPhone
+        w.contentMinSize = NSSize(width: 860, height: 500)
         window = w
-        if let screen = w.screen ?? NSScreen.main {
-            w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
-        }
-        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
-        host.sizingOptions = []   // the Form's measured scroll content owns the height, including after collapse
+        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }))
         w.contentView = host
-        host.layoutSubtreeIfNeeded()
+        w.center()
         // no activation and no ordering in front of another app's windows: LaunchServices activates an app opened from Finder or the Dock (applicationDidBecomeActive), open -g does not
         if NSApp.isActive { w.makeKeyAndOrderFront(nil) } else { w.orderBack(nil) }
     }
@@ -283,12 +326,6 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         return .terminateNow   // not terminateCancel, which a logout or restart takes as a refusal and stops
     }
     func windowWillClose(_ n: Notification) { finish(false) }
-
-    func fit(_ extraHeight: CGFloat) {
-        guard let w = window, let screen = w.screen else { return }
-        let frame = LauncherWindowLayout.fitted(w.frame, extraHeight: extraHeight, visible: screen.visibleFrame)
-        if abs(frame.height - w.frame.height) > 0.5 { w.setFrame(frame, display: true) }
-    }
 
     func finish(_ play: Bool) {
         guard let w = window else { return }

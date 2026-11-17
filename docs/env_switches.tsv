@@ -123,6 +123,7 @@ DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window 
 DM_LAUNCHER_BG	path	build_ipa.sh: a picture packed as the iOS launcher's background (`dm/launcher_background.jpg`, at most 2400 px), for a player's own build; a picture chosen in the launcher's Look tab wins; without either the launcher draws its forest (LauncherHome.swift)
 DM_LAUNCHER_TITLE	switch	build_ipa.sh: the iOS launcher's title (`dm/launcher_title.txt`) in place of the app's name, which stays as it is
 DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once; `oe::ExecuteProgram` sets it for the program it starts; a relaunch removes it
+DM_LINK_30HZ	switch	`1` puts the display link at 30 Hz at a 30 fps target (frame generation off), `0` at 60 Hz with each frame held two ticks; unset, the window and screen decide (`link_30hz`: 30 Hz on iOS). On an iPhone 18 Pro the 60 Hz link did not lower the GPU time (L6.5, logs 51-52)
 DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz Mac screens; by default the link counts only the refreshes nearest a steady 1/60 s clock
 DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
 DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames
@@ -133,7 +134,7 @@ DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exc
 DM_MESH_ASYNC	switch	`0`: a native task / mesh draw whose pipeline the archive lacks waits while it is built, as before; by default (in an app, which has a window) the pipeline is built on a worker, at most three at once, and its draws are skipped meanwhile (nvn_geometry.inc mtk_pso)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
-DM_MIC	player	`1` offers the device's microphone to a game's audio input streams (nn::audio InputStream, 48 kHz mono; mic_apple.m): Ocarina of Time plays its ocarina by voice; off by default; launcher setting (iOS)
+DM_MIC	player	`1` offers the device's microphone to a game's audio input streams (nn::audio InputStream, 48 kHz mono; mic_apple.m): Ocarina of Time plays its ocarina by voice; off by default; launcher setting (iOS and the Mac app)
 DM_MOTION	switch	`0` ignores live motion: every six-axis sensor lies flat as before (a shake still plays), and neither controllers' motion sensors nor the phone's device motion are switched on (`hle_hid.c`, `motion_apple.h`, `DmGamepad.m`); the NSP script's `--no-motion` (`MOTION = False`) builds it in
 DM_MOTION_ACC_SIGN	switch	`-1` flips only GameController's acceleration, for a source that reports the specific force (+1 G up at rest) instead of the gravity direction (`motion_fusion.h`); phone and raw HID samples are already in the Switch frame
 DM_MOTION_AXES	switch	`=<map>` such as `x,-z,y`: maps Apple's controller axes to the Switch's, a signed permutation applied to acceleration and rotation alike, for a controller whose axes differ (default `x,y,z`; phone and raw HID samples are already in the Switch frame)

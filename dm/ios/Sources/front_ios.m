@@ -27,6 +27,25 @@ const char *front_ios_device_check(void);   // main.m: why this device cannot ru
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
+// Apple's Performance HUD (DM_METAL_HUD) needs two things at two different times, and a merge had dropped both (L6.5: the HUD switched on in the launcher never showed):
+//   MTL_HUD_ENABLED in the environment before the process's first Metal device. The host's loading starts at app launch and can get there before the launcher's choice
+//     reaches startGame's front_hud_env, so last run's saved choice (the launcher keeps it in UserDefaults as a string) is applied at load time, as front_mac.m does.
+//     An explicit DM_METAL_HUD (env file) wins
+//   developerHUDProperties on the layer that is presented: set when the game view is made and again after its first layout, which reconfigures the layer
+__attribute__((constructor)) static void hud_saved(void) {
+    if (getenv("DM_METAL_HUD")) return;
+    NSString *v = [NSUserDefaults.standardUserDefaults stringForKey:@"launcher.DM_METAL_HUD"];
+    if (v.intValue) { setenv("MTL_HUD_ENABLED", "1", 0); setenv("MTL_HUD_HIDE_METALFX_METRICS", "1", 0); }
+}
+// The log line says what the layer kept and whether MTL_HUD_ENABLED was set in time, so a phone where the HUD still does not appear can be told apart
+static void front_hud_apply(const char *when) {
+    if (!(getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD")))) return;
+    if (!g_layer) { LOG("front end: Metal performance HUD asked for at %s, but there is no Metal layer yet", when); return; }
+    g_layer.developerHUDProperties = @{@"mode": @"default"};
+    const char *env = getenv("MTL_HUD_ENABLED");
+    LOG("front end: Metal performance HUD on at %s (properties %s, MTL_HUD_ENABLED=%s)", when,
+        g_layer.developerHUDProperties.count ? "kept" : "[RED] dropped by the layer", env ? env : "[RED] unset: the first device was made before it");
+}
 static void front_ios_notify_setup(void);
 static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
@@ -176,7 +195,7 @@ static void launcher_done(void) { [g_root startGame]; }
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
-    if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
+    front_hud_apply("game view");   // Apple's HUD over the game: frame rate, frame and GPU time, memory
     dm_haptics_apple_init();
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -191,6 +210,7 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
+    { static int laid; if (!laid++) front_hud_apply("first layout"); }
     CGRect division = CGRectNull;   // an iPhone Duo's fold, as UIKit reports it (iOS 27.1)
     NSMutableArray<NSString *> *regionLog = [NSMutableArray array];
 #if __has_include(<UIKit/UIHingeInteraction.h>)

@@ -1,5 +1,5 @@
 // The device's microphone for a game's audio input streams (hle_audio.c, nn::audio's InputStream): 48 kHz mono PCM16 in a ring the capture fills and each open stream reads with a
-// cursor of its own. The Legend of Zelda: Ocarina of Time (Switch 2) plays its ocarina by voice through two such streams. DM_MIC=1 (the iOS launcher's Microphone row) offers the
+// cursor of its own. The Legend of Zelda: Ocarina of Time (Switch 2) plays its ocarina by voice through two such streams. DM_MIC=1 (the launcher's Microphone row, iOS and the Mac app) offers the
 // microphone to the game; without it, or without permission or an app usage description, the host lists no input device as before
 #pragma once
 #include <stdint.h>

@@ -90,7 +90,8 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
 
 
 def swift_sources():   # the settings window, with the iOS launcher's model, rows and cloud-save report
-    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift']
+    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift',
+            HERE.parent / 'ios/Sources/LauncherHome.swift']   # the iPhone launcher's home views, which the Mac window lays out (kid-with-sword-remake)
 
 
 def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
@@ -126,6 +127,7 @@ def info_plist(a, minos, icon):
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
+         'NSMicrophoneUsageDescription': 'With Microphone on in the settings, a game that listens (such as playing the ocarina by voice) hears you through the microphone.',   # mic_apple.m: without it DM_MIC offers no input device
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
     if a.settings:
@@ -369,6 +371,12 @@ def pack(a):
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
+    # A player's own build, as build_ipa.sh: DM_LAUNCHER_BG is the launcher's background and DM_LAUNCHER_TITLE its title (neither is in the repository)
+    bg, title = os.environ.get('DM_LAUNCHER_BG'), os.environ.get('DM_LAUNCHER_TITLE')
+    if bg:
+        if not Path(bg).is_file(): raise SystemExit(f'DM_LAUNCHER_BG: no file {bg}')
+        run(['sips', '-s', 'format', 'jpeg', '-Z', '2400', bg, '--out', dm / 'launcher_background.jpg'])
+    if title: (dm / 'launcher_title.txt').write_text(title + '\n', encoding='utf-8')
     if a.control_nacp: shutil.copyfile(a.control_nacp, res / 'control.nacp')
     msl_dst = res / 'msl' / (a.msl_name or msl.name)
     old_app = out if out.is_dir() else None

@@ -38,18 +38,18 @@ The latest nxnative engine with this port's iPhone fixes on top: the white scree
 
 **Coming in the next build (in testing now):**
 
-- **A Mac app with the same launcher as the iPhone**, made for the Mac: a resizable window, keyboard shortcuts and your own background picture. See [Mac app](#mac-app).
+- **A Mac app with the same launcher as the iPhone**, made for the Mac: a resizable window, keyboard shortcuts, your own background picture, and the microphone ocarina. See [Mac app](#mac-app).
 - **A simpler iPhone launcher.** Settings that only slow the game down on a phone are now hidden there: Upscaling, Dynamic Resolution, Game's Upscaler (the iPhone always uses MetalFX), Metal 4 pipelines, Pipeline prebuild and the encoder thread. They stay on the Mac, and Wide view stays on both.
 
 ## Features
 
-| | |
+| Feature | What it does |
 |---|---|
 | ⚔️ **Native speed** | The game's code runs on the Apple chip; pipelines are built once, then it starts in about 3 seconds |
 | 🎞️ **Frame generation** | 30 frames drawn, 60 shown, with MetalFX's frame interpolator |
 | 🔍 **MetalFX upscaling** | In place of the game's own upscaler, which cost a phone 5–10 ms a frame |
 | 📱 **Wide view** | Fills the iPhone's screen at its own shape, nothing stretched |
-| 🎵 **Ocarina with your microphone** | Hum or whistle the notes into your iPhone's microphone to play the ocarina |
+| 🎵 **Ocarina with your microphone** | Hum or whistle the notes into your iPhone's or Mac's microphone to play the ocarina |
 | 🛡️ **Amiibo** | From a list, a real figure over NFC, or Shortcuts |
 | 💻 **Mac app** | The same launcher, made for the Mac |
 
@@ -62,7 +62,7 @@ In detail:
 - **Wide view.** The game fills the iPhone's screen at its own shape, with nothing stretched.
 - **A launcher** with the frame limit, frame generation, Wide view, the Ocarina microphone, the Performance HUD and a Render Scale slider on its main screen, and every other setting under All Settings. The iPhone only shows the settings that help a phone.
 - **A Mac app** with the same launcher, for Apple silicon Macs.
-- **Play the ocarina with your iPhone's microphone.** Hum or whistle the notes and the game hears them, like playing the ocarina for real. Turn on **Microphone** in the launcher (off by default); iOS asks for the microphone once. iPhone only.
+- **Play the ocarina with your microphone,** on iPhone and Mac. Hum or whistle the notes and the game hears them, like playing the ocarina for real. Turn on **Ocarina Mic** on the launcher's main screen (off by default); the system asks for the microphone once.
 - **Amiibo**: pick one from an in-game list, scan a real figure with the iPhone's NFC reader, or tap one through Shortcuts in LiveContainer.
 - **Touch controls**, and any controller iOS supports.
 - **No long freezes when a new shader appears**: a new pipeline gets at most 50 ms of a frame, and is built in the background after that.
@@ -135,7 +135,7 @@ Controls, saves and settings: [Playing](docs/playing.md).
 
 ## Mac app
 
-The same game as a double-clickable Mac app, for Apple silicon Macs. It uses the same game folder and the same launcher as the iPhone: the Render Scale slider, Frame Limit, Frame Generation, Wide view, the Performance HUD and Display Mode (window or full screen) are on its main screen, and every setting is under **All Settings**, including the Mac-only ones.
+The same game as a double-clickable Mac app, for Apple silicon Macs. It uses the same game folder and the same launcher as the iPhone: the Render Scale slider, Frame Limit, Frame Generation, Wide view, Ocarina Mic, the Performance HUD and Display Mode (window or full screen) are on its main screen, and every setting is under **All Settings**, including the Mac-only ones.
 
 Build it after step 1 of [Build](#build):
 

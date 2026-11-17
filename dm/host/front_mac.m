@@ -19,6 +19,7 @@
 #include "hle.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
+#include "mic_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
 #include "pad_jc1_mac.h"
@@ -1647,6 +1648,7 @@ void front_run(void (*guest)(void)) {
                 pads_changed(conn ? nil : c);
                 if (conn) hq_log_setting(); }];
         dm_haptics_apple_init();
+        dm_mic_prepare();   // DM_MIC: ask for the microphone at start, so the game's first listing finds the permission decided (the app's Info.plist describes it, pack_app.py)
         pads_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual

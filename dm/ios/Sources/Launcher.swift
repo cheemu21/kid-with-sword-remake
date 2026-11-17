@@ -286,6 +286,12 @@ private struct LauncherView: View {
 // (Cool mode went from the launcher in L3, and with it its default on phones under 10 GB of memory.) A phone without MetalFX's Metal 4 frame interpolator gets no frame generation
 // (the host's own check, nvn_mtl.m, leaves the game at 30 and records it for the next start; the launcher makes no Metal device, issue #840)
 private func deviceSetup() {
+    // A phone with 8 GB of memory (an iPhone 16 or 16 Pro; the 12 GB phones report about 11.5) starts at render scale 0.5, as long as the player has not chosen one (L6.6):
+    // Ocarina of Time's GPU frame at 0.6 took 29-30 ms of the 33.3 at 30 fps on an iPhone 18 Pro (log 52), and an 8 GB phone has a slower GPU and about 2 GB less room
+    if ProcessInfo.processInfo.physicalMemory < 10 << 30 {
+        LauncherModel.deviceDefaults["DM_RENDER_SCALE"] = "0.50"
+        fputs("launcher: \(ProcessInfo.processInfo.physicalMemory >> 20) MB of memory: render scale 0.50 to start with\n", stderr)
+    }
     // what the game found the last time it started (nvn_mtl.m fg_on): making a Metal device here, before startGame applies DM_METAL_HUD, would keep the Performance HUD off
     if UserDefaults.standard.bool(forKey: "dm.framegen.unsupported") {
         LauncherModel.unavailable["DM_FRAMEGEN"] = "This iPhone can't make in-between frames: MetalFX frame interpolation needs a newer chip. The game shows its own 30 fps."
