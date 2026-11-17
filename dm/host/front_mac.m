@@ -33,7 +33,11 @@ static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
-static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
+static int g_input_on = 1;   // main thread: the game window is key, so its keyboard and mouse reach the game (input_release / input_resume)
+static int g_pads_on = 1;    // main thread: the controllers reach the game: the window is key, or it is up and DM_FOCUS_KEEP keeps the game in focus (input_release)
+// DM_FOCUS_KEEP=1: the game stays in focus while its window is up, whichever app is active, and so do the controllers (a game on a second screen played while another app has the
+// keyboard); the keyboard and mouse still reach the game only while its window is key
+static int focus_keep(void) { static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP")); return keep; }
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
@@ -174,7 +178,7 @@ static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32
 static void hq_poll(void);
 static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h): while the prompt is open the controllers' input goes to it, not to the game
 static void pad_read(GCExtendedGamepad *g) {
-    if (!g_input_on) return;
+    if (!g_pads_on) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
@@ -190,7 +194,7 @@ static void pad_read(GCExtendedGamepad *g) {
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
 static void pad_keep_system_buttons(GCController *c) {
     for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
-    c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
+    c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_pads_on) hq_poll(); };
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -245,7 +249,7 @@ static void pads_changed(GCController *gone) {
 }
 // Display sleep: macOS counts keyboard and mouse input as user activity, not a controller's, so in controller-only play the display dims and locks; the latency
 // activity in front_run keeps the system awake, not the display. While the game window is key the display stays awake (NSActivityIdleDisplaySleepDisabled);
-// losing focus or being minimized lets it sleep again. An explicit lock or sleep is not held off, and no input is synthesized
+// losing focus (unless DM_FOCUS_KEEP keeps the controllers playing) or being minimized lets it sleep again. An explicit lock or sleep is not held off, and no input is synthesized
 static id g_display_activity;
 static void display_awake(int on) {
     if (on && !g_display_activity)
@@ -269,25 +273,30 @@ static void pads_reread(void) {
     for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
 }
 static void hq_close(void);
-static void input_release(void) {
-    hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
+// pads: the controllers too (minimized, or focus lost without DM_FOCUS_KEEP); otherwise they keep playing and the display stays awake for them
+static void input_release(int pads) {
     [NSCursor setHiddenUntilMouseMoves:NO];
-    display_awake(0);
     g_input_on = 0;
-    dm_motion_pro_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    if (!pads) return;
+    hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
+    display_awake(0);
+    g_pads_on = 0;
+    dm_motion_pro_active(0);
     pads_release();
 }
 static void input_resume(void) {
     display_awake(1);
     g_input_on = 1;
+    if (g_pads_on) return;
+    g_pads_on = 1;
     dm_motion_pro_active(1);
     pads_reread();
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name
 static void hidpad_read(hid_pad *d) {
-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    if (!g_pads_on || hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
     int32_t s[4]; pad_hid_sticks(&d->st, s);
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
@@ -415,6 +424,7 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     hq_start();
+    if (focus_keep()) GCController.shouldMonitorBackgroundEvents = YES;   // GameController delivers a controller's changes while another app is active
     pads_changed(nil);
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
@@ -1478,7 +1488,8 @@ void front_run(void (*guest)(void)) {
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
                                                       usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
-        // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
+        // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again; under DM_FOCUS_KEEP the controllers
+        // stay on until the window is minimized
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
         [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
@@ -1488,10 +1499,10 @@ void front_run(void (*guest)(void)) {
         [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
-        static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) { dm_focus_set(2); pause_watch(YES); } }];
+        int keep = focus_keep();
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(!keep || win.miniaturized || g_text_box); if (!win.miniaturized && !g_text_box && !keep) { dm_focus_set(2); pause_watch(YES); } }];
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); pause_watch(NO); }];
-        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
+        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(1); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
