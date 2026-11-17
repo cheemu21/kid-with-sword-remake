@@ -6,9 +6,9 @@ It is not an emulator: the game's own code runs directly on the iPhone's chip, w
 
 [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) · [Features](#features) · [Requirements](#requirements) · [Build](#build) · [Install and play](#install-and-play) · [Best settings](#best-settings) · [Known issues](#known-issues) · [Credits](#credits) · [Acknowledgements](#acknowledgements)
 
-## Latest: L6.1 (pre-release)
+## Latest: L6.3 (pre-release)
 
-The latest nxnative engine with this port's iPhone fixes on top, and the white screen after pulling the Master Sword fixed. Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for what changed in each build.
+The latest nxnative engine with this port's iPhone fixes on top: the white screen after pulling the Master Sword fixed, and no more once-a-second hitches after an area change. Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for what changed in each build.
 
 ## Features
 
@@ -22,6 +22,7 @@ The latest nxnative engine with this port's iPhone fixes on top, and the white s
 - **Amiibo**: pick one from an in-game list, scan a real figure with the iPhone's NFC reader, or tap one through Shortcuts in LiveContainer.
 - **Touch controls**, and any controller iOS supports.
 - **No long freezes when a new shader appears**: a new pipeline gets at most 50 ms of a frame, and is built in the background after that.
+- **Steady after area changes**: unused render targets are freed a few at a time, so memory stays near 5 GB without hitches.
 - **Cutscenes in time with their sound** at 30 fps.
 
 ## Requirements
@@ -57,8 +58,10 @@ The shaders are built with Xcode 27.2's Metal compiler: select it first with `su
 **3. Save the build settings** below as `env.txt`, then **build**:
 
 ```
-python3 scripts/build_ipa_from_nsp.py ~/Games/OcarinaOfTime --romfs separate --env-file env.txt
+python3 scripts/build_ipa_from_nsp.py ~/Games/OcarinaOfTime --romfs separate --env-file env.txt --icon icon.png
 ```
+
+`--icon` takes any JPEG or PNG for the home-screen icon; a dump folder has none of its own, so without it the icon is blank.
 
 The IPA appears in the game's folder. The first build compiles about 43,000 shaders and takes one to two hours; building again reuses them and takes minutes.
 
@@ -73,7 +76,6 @@ DM_QOS_EDGES=45,59
 DM_NVN_GPUPROF=every:600
 DM_BOOTPROF=1
 DM_GUEST_FILE=1
-DM_WAKE_UNLOCKED=0
 ```
 
 ## Install and play
@@ -102,7 +104,8 @@ Start with a cool phone: when iOS reports the phone as hot, it halves the CPU's 
 - In heavy areas the iPhone's GPU is near its limit at 30 fps; with frame generation on, some frames drop there.
 - Long sessions heat the phone, and iOS lowers its clocks.
 - The first area after starting can freeze for up to half a second while its textures load.
-- One test of L6's thread setting froze after about a minute; a watchdog now logs the game's threads if the picture stops for 5 seconds.
+- Area loads can take a frame of 200–300 ms.
+- If the picture ever stops for 5 seconds, a watchdog writes the game's threads to `log.txt`: send that log.
 
 ## Credits
 

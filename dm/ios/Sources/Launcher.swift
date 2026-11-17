@@ -123,6 +123,7 @@ private struct LauncherView: View {
         }
         .overlay(alignment: .trailing) { drawerOverlay }
         .preferredColorScheme(.dark)
+        .environment(\.colorScheme, .dark)
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
             Button(r.localLabel(here: "iPhone")) { go(r.localChoice) }
             Button(r.cloudLabel) { go(r.cloudChoice) }
@@ -318,6 +319,10 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
     }
     let h = DmHostingController(rootView: view)
     h.modalPresentationStyle = .fullScreen
+    // The launcher is drawn dark whatever the phone's appearance: .preferredColorScheme(.dark) on the root view alone did not reach this UIKit-presented controller, so with the
+    // phone in light mode the settings list, the dialogs and the pickers took light-mode colours (a member's report: black text on the dark rows). The override covers
+    // everything it presents
+    h.overrideUserInterfaceStyle = .dark
     host = h
     parent.present(h, animated: false)
     fputs("launcher: \(file.settings.count) settings shown\n", stderr)

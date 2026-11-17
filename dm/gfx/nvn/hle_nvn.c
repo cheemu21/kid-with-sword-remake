@@ -1785,8 +1785,9 @@ void dm_gfx_suspend(int on) {
 // logs every guest thread's wait as it stands (hle_thread.c svc_thread_dump_live, no thread suspended), once per stall; the next stall after frames came back logs again, up to 4 times.
 // An iPhone log (log 44, L6) ended on a picture that stayed stuck with nothing said, so what the game was waiting for was lost; DM_STALL_DUMP=0 turns this off
 static _Atomic uint64_t g_frame;   // (defined below with the frame stats)
+__attribute__((weak)) void svc_thread_dump_live(void) {}   // the host's (hle_thread.c) replaces this; the graphics tests link no host threads
 static void *stall_watch(void *p) {
-    (void)p; void svc_thread_dump_live(void);
+    (void)p;
     uint64_t last = 0; int still = 0, dumped = 0, n = 0;
     for (;;) {
         sleep(1);
@@ -2246,7 +2247,11 @@ static double rt_share(int acq) {
     static double a = -1, f = -1;
     if (a < 0) {
 #if TARGET_OS_IPHONE
-        a = 0.5; f = 0.3;
+        // L6.2: 0.4 and 0.55 (0.5 and 0.3 before). With the frame threads at 0.3 (10 ms at 30 fps), a hot iPhone 18 Pro's queue replay thread needed more than it could
+        // declare (10.2-10.7 ms a frame at 1.8-1.9 GHz, logs 42 and 46) and was held up about once a second: 120-250 ms frames every 1.0 s once the phone reached its
+        // serious thermal state, as nvn_rt.h describes for a declaration under the need. The acquire thread used 4-6 ms a frame but declared its 16.7 ms cap. Together the
+        // three still declare at most 1.5 periods, under the two performance cores, against L3's 2.0 (log 35: 14 + 30 + 20 ms)
+        a = 0.4; f = 0.55;
 #else
         a = 0.9; f = 0.9;
 #endif

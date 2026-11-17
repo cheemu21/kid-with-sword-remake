@@ -75,7 +75,7 @@ int main(void) { @autoreleasepool {
         at(310);
         for (int k = 0; k < N; k++) { ts[2 * k + 1] = target(&pool, 98001 + 2 * k, (8 << 20) + ((int64_t)k << 14), NVN_FORMAT_R32F, 32); drawn(tex_mtl(&ts[2 * k + 1])); }
         uint64_t n0 = g_tu_n, ns0 = g_tu_ns;
-        int64_t rounds = 0; for (uint32_t now = 350; g_tu_n - n0 < N && rounds < 20; now += 10, rounds++) pass(now);
+        int64_t rounds = 0; for (uint32_t now = 350; g_tu_n - n0 < N && rounds < N / TU_MAX + 4; now += TU_EVERY, rounds++) pass(now);   // TU_MAX a pass, a pass every TU_EVERY
         double ms = (g_tu_ns - ns0) / 1e6 / (double)rounds;
         printf("a pass over %u covered targets: %.3f ms (%lld passes released %llu)\n", g_tu.n + (unsigned)(g_tu_n - n0), ms, (long long)rounds, (unsigned long long)(g_tu_n - n0));
         CHECK(g_tu_n - n0 == N, "every target drawn over goes, TU_MAX a pass");
