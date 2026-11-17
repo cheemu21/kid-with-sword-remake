@@ -44,10 +44,8 @@ int main(void) { @autoreleasepool {
     CHECK(first_colour(image, 1) == colours[1 + skipped], "the following mip retains its original content");
     unsigned level = skipped + 1; CHECK(lv_host(&t, image, &level) && level == 1, "guest mip maps to its host level");
     level = 0; CHECK(lv_host(&t, image, &level) == !skipped, "copies of a removed mip are refused");
-    MTLTextureDescriptor *d = tex_desc(&t, 1); d.usage |= MTLTextureUsageShaderWrite;
-    CHECK(!mip_skip(&t, d), "shader-written textures keep their storage");
     tex_t img = t; img.d.flags = NVN_TEXTURE_FLAGS_IMAGE;
-    CHECK(!mip_skip(&img, tex_desc(&img, 1)), "image textures (shader-writable) keep their storage");
+    CHECK(mip_skip(&img, tex_desc(&img, 1)) == skipped, "a compressed image texture is reduced too: no shader stores into a compressed format");
     tex_t rgba = t; rgba.d.format = NVN_FORMAT_RGBA8;
     CHECK(!mip_skip(&rgba, tex_desc(&rgba, 1)), "uncompressed render formats are unchanged");
     CHECK(!tex_mip_skipped(&rgba, image), "an unrelated size difference does not remap levels");

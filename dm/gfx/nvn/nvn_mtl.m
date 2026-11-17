@@ -3778,7 +3778,7 @@ static int tex_cpu_wait(const tex_t *t) {
 // The texture memory saver (DM_NVN_TEX_MIP_SKIP, from the PRAGMATA investigation, nxnative #1319; L7): a CPU-written compressed 2D, 2D array, cube or cube array texture of at
 // least that many pixels on its shorter side is made without its 1-3 finest levels (DM_NVN_TEX_MIP_LEVELS; at least one level kept). The finest level is about three quarters of
 // a texture's bytes, so those textures take about a quarter of the memory, and an area load converts and uploads about a quarter of their bytes. The guest's level l + k is the host
-// texture's level l: uploads (pkg_upload_), views and sparse clamps (tex_level_shift) and copies (lv_host) translate. Render targets and shader-written textures keep their storage.
+// texture's level l: uploads (pkg_upload_), views and sparse clamps (tex_level_shift) and copies (lv_host) translate. Uncompressed textures (render targets, shader-written ones) are never reduced.
 // Close-up detail is the price: the iPhone launcher's Texture Memory Saver row (on by default with 8 GB of memory)
 static unsigned mip_skip_levels(void) { static unsigned n; if (!n) { const char *e = getenv("DM_NVN_TEX_MIP_LEVELS"); int v = e ? atoi(e) : 1; n = (unsigned)MAX(1, MIN(v, 3)); } return n; }
 static unsigned mip_skip_px(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_TEX_MIP_SKIP"); v = e ? atoi(e) : 0; if (v == 1) v = 512; if (v < 0) v = 0;
@@ -3786,7 +3786,9 @@ static unsigned mip_skip_px(void) { static int v = -1; if (v < 0) { const char *
 static int mip_skip_target(const tex_t *t) { return t->d.target == 1 || t->d.target == 4 || t->d.target == 8 || t->d.target == 9; }   // 2D, 2D array, cube, cube array
 static unsigned mip_skip(const tex_t *t, MTLTextureDescriptor *d) {
     unsigned px = mip_skip_px();
-    if (!px || !fmt_compressed(t->d.format) || (d.usage & MTLTextureUsageShaderWrite) || d.mipmapLevelCount < 2 || !mip_skip_target(t)) return 0;
+    // Not the shader-write usage: an NVN image (NVN_TEXTURE_FLAGS_IMAGE) gets it (img_usage), but no shader stores into a compressed format, on the Switch's GPU or an Apple one.
+    // Ocarina of Time makes nearly every texture an image: excluding them, as the PRAGMATA patch did, left 2,300 of 2,329 large compressed textures of a walk unreduced
+    if (!px || !fmt_compressed(t->d.format) || d.mipmapLevelCount < 2 || !mip_skip_target(t)) return 0;
     return MIN(d.width, d.height) >= px ? MIN(mip_skip_levels(), (unsigned)d.mipmapLevelCount - 1) : 0;
 }
 // How many finest levels the host texture m of t (or the texture a view of it is of) lacks: the levels by which its size falls short of the guest's
