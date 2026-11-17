@@ -78,7 +78,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(set(ios) - set(mac), {'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_PAD_THEME'})
         self.assertIn('DM_SHOW_FPS', mac)
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_FOCUS_KEEP'})   # the Mac window's Display mode and Play in the background (front_mac.m reads 1 or 0)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
