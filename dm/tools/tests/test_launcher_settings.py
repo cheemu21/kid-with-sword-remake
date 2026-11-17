@@ -15,8 +15,8 @@ settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
 BOTW, WONDER = '01007EF00011E000', '010015100B514000'
-PERFORMANCE_NVN = ['DM_FPS_HOLD', 'DM_METAL_HUD']   # the iPhone's; the Mac's also has Frame Buffering and the three pipeline and encoding switches
-PERFORMANCE_NVN_MAC = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
+PERFORMANCE_NVN = ['DM_NVN_TEX_MIP_SKIP', 'DM_FPS_HOLD', 'DM_METAL_HUD']   # the iPhone's; the Mac's also has Frame Buffering and the three pipeline and encoding switches
+PERFORMANCE_NVN_MAC = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_NVN_TEX_MIP_SKIP', 'DM_FPS_HOLD', 'DM_METAL_HUD']
 # kid-with-sword-remake: switches whose other value only slows the game down on an iPhone are offered on the Mac alone (settings.tsv <condition>&platform:mac)
 IPHONE_HIDDEN = {'DM_PRESENT_SNAP', 'DM_PRESENT_UPSCALE', 'DM_UPSCALER', 'DM_DYNAMIC_RESOLUTION', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD'}
 

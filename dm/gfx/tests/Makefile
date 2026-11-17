@@ -896,3 +896,10 @@ check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
 t_sparse_copy: t_sparse_copy.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_copy.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 check_t_sparse_copy: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_texture_quality: t_texture_quality.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_texture_quality.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_texture_quality
+check_t_texture_quality: t_texture_quality
+	DM_NVN_TEX_MIP_SKIP=0 MTL_DEBUG_LAYER=1 ./t_texture_quality
+	@for levels in 1 2 3; do DM_NVN_TEX_MIP_SKIP=512 DM_NVN_TEX_MIP_LEVELS=$$levels MTL_DEBUG_LAYER=1 ./t_texture_quality || exit $$?; done
