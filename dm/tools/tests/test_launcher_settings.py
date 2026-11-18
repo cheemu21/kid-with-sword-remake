@@ -175,7 +175,7 @@ class LauncherSettingsTests(unittest.TestCase):
                     patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
                 (Path(tmp) / 'main.fixups.tsv').write_text(f'# RENDER_SCALE\t{value}\n')
                 row = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['DM_RENDER_SCALE']
-            self.assertEqual((row['min'], row['max']), (0.5, top))
+            self.assertEqual((row['min'], row['max']), (0.25, top))   # the host takes 0.25 and up (loader.c); the slider went down to 0.25 in L7.4
 
     def test_table_format_is_strict(self):
         good = 'DM_X\ttoggle\t-\t0\talways\tGame\tX\n'
