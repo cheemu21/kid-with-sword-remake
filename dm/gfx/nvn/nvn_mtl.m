@@ -5331,7 +5331,36 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
 // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
+// The pools in the residency set and why (L7.2.1, diagnostic, every 600 frames): a pool's zero-copy buffer in the set wires every page of it, and on an iPhone that is charged to the app's
+// footprint (the graphics ledger: 2.4-3.9 GB of Ocarina of Time's 3.4-5.2 GB on an iPhone 18 Pro). n_tex_reads / n_other: the first lookups of each pool by texture uploads and by
+// everything else (draw bindings, copies, the raw memory table); a pool only texture uploads reached holds what the GPU samples from host textures, not from the pool
+static void pool_census(unsigned long long frame) {
+    enum { TOP = 8 };
+    uint64_t nb = 0, rb = 0, rb_tex = 0, rb_addr = 0, big_b = 0; int n = 0, nr = 0, nr_tex = 0, nr_addr = 0;
+    struct { uint64_t size; uint32_t t, o; int reach, addr; double age; } top[TOP] = {{0}}; int ntop = 0;
+    pthread_mutex_lock(&g_mu);
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    for (int i = 0; i < g_npool; i++) { const pool_ent *e = &g_pools[i]; uint64_t z = e->hi - e->lo; n++; nb += z;
+        if (!e->res) continue;
+        int addr = addr_meets(e->lo, e->hi); nr++; rb += z;
+        if (!e->n_other) { nr_tex++; rb_tex += z; }
+        if (addr) { nr_addr++; rb_addr += z; }
+        int k = ntop < TOP ? ntop++ : TOP - 1;
+        if (k == TOP - 1 && ntop == TOP && top[k].size >= z) continue;
+        top[k].size = z; top[k].t = e->n_tex_reads; top[k].o = e->n_other; top[k].reach = e->reach; top[k].addr = addr; top[k].age = (now - e->born) / 1e9;
+        for (int j = k; j > 0 && top[j].size > top[j - 1].size; j--) { __typeof__(top[0]) x = top[j]; top[j] = top[j - 1]; top[j - 1] = x; } }
+    for (int i = 0; i < g_nbig; i++) big_b += g_big[i].hi - g_big[i].lo;
+    int nbig = g_nbig;
+    pthread_mutex_unlock(&g_mu);
+    char t[1024]; size_t o = 0;
+    for (int i = 0; i < ntop && o < sizeof t - 96; i++)
+        o += (size_t)snprintf(t + o, sizeof t - o, "%s%.0f MB (uploads %u / other %u%s%s, %.0f s old)", i ? "; " : "", top[i].size / 1048576.0, top[i].t, top[i].o,
+                              top[i].addr ? ", address given out" : "", top[i].reach == REACH_WHOLE ? ", whole large pool" : top[i].reach == REACH_SHORT ? ", chunk" : "", top[i].age);
+    MLOG("[pools] frame %llu: %d pool buffers %.0f MB, %d in the residency set %.0f MB (only texture uploads reached %d of them, %.0f MB; with an address the game gave out %d, %.0f MB); large pools %d, %.0f MB; largest held: %s",
+         frame, n, nb / 1048576.0, nr, rb / 1048576.0, nr_tex, rb_tex / 1048576.0, nr_addr, rb_addr / 1048576.0, nbig, big_b / 1048576.0, ntop ? t : "none");
+}
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
+    if (!(frame % 600)) pool_census(frame);
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
