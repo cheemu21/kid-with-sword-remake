@@ -3349,7 +3349,17 @@ static NSMutableArray *g_up_keep;
 // batches; up_begin publishes queued commits before waiting for a slot. A single
 // texture larger than the budget gets its own block (uploads are not tiled here).
 static size_t g_up_staging_bytes;
-#define UP_BATCH_BYTES (128u * 1024u * 1024u)
+// A batch's budget: its staging and, since L7.2, the guest memory its uploads read through source buffers of their own (up_big_src), which stays wired until the batch completes and
+// was not counted before. On an iPhone 18 Pro, Ocarina of Time's area loads (300-650 uploads, 57-245 MB a frame) raised the app's footprint by about 1.2 GB for a few seconds, from
+// 3.8 to 5.0 GB, the graphics ledger alone from 2.4 to 3.7 GB (memstat). 48 MB on iOS, 128 MB on the Mac as before; DM_NVN_UP_BATCH_MB=<MB> sets it (16 to 512)
+static size_t up_batch_bytes(void) {
+    static size_t v; if (v) return v;
+    const char *e = getenv("DM_NVN_UP_BATCH_MB"); long mb = e && *e ? atol(e) : (TARGET_OS_IPHONE ? 48 : 128);
+    v = (size_t)MAX(16, MIN(mb, 512)) << 20;
+    MLOG("upload batches: %zu MB of staging and source memory each, then the batch is committed (DM_NVN_UP_BATCH_MB)", v >> 20);
+    return v;
+}
+#define UP_BATCH_BYTES up_batch_bytes()
 
 
 // The upload command buffer was discarded by the system (dropped along during GPU error recovery; the first frame on entering Travincal drops one every run): the objects of this batch of textures are built and the timestamps updated, but the content was never written in,
@@ -3469,8 +3479,8 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
     size_t extra = MAX(need, UP_BLOCK_SIZE);
     // This call starts one texture's upload: all prior deswizzles and copies are
     // complete records, so the batch can be split without ending the render pass.
-    if (g_up_staging_bytes && (!g_up_block || need > g_up_block_size - g_up_block_off)
-        && extra > UP_BATCH_BYTES - MIN(g_up_staging_bytes, UP_BATCH_BYTES)) {
+    if (g_up_staging_bytes && (((!g_up_block || need > g_up_block_size - g_up_block_off) && extra > UP_BATCH_BYTES - MIN(g_up_staging_bytes, UP_BATCH_BYTES))
+        || g_up_staging_bytes >= UP_BATCH_BYTES)) {   // or the source memory read so far (up_big_src) has reached the budget by itself
         up_flush();
         up_begin();
     }
@@ -3738,7 +3748,7 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
     uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)addr & ~(pg - 1), b = ((uintptr_t)addr + len + pg - 1) & ~(pg - 1);
     id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
     if (!buf) return nil;
-    g_up_src_made++;
+    g_up_src_made++; g_up_staging_bytes += b - a;   // counted against the batch's budget: wired until the batch completes (up_alloc splits the batch at the next texture)
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }

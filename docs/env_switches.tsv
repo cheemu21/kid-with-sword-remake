@@ -284,6 +284,7 @@ DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in
 DM_NVN_UNBIND_DEFER	switch	`0` makes an empty `SetRenderTargets` end the open render pass again; by default the unbind is deferred, so a following binding of the same targets continues the pass (`nvn_mtl.m` `unb_on`, on by default)
 DM_NVN_UNWRITTEN_DC	switch	`0` disables optional stores elided for loaded, unchanged attachments (on by default, independent of TBDR lookahead), for equivalence comparisons; mandatory image-write preservation stays active
 DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
+DM_NVN_UP_BATCH_MB	switch	`=<MB>` (16 to 512): an upload batch is committed once its staging and the guest memory its uploads read through their own source buffers reach this much (default 48 on iOS, 128 on the Mac); a player may set it in Documents/env.txt
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
 DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a cached vertex conversion range (`vconv_range`) and reports differences
 DM_NVN_VCONV_CPU	switch	`=1` converts on the CPU every vertex attribute Metal's fetch cannot read, as before, instead of through the shader's shadow inputs (`<key>_bv`) or its pulling entry (`<key>_bp`)
