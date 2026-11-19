@@ -1,4 +1,5 @@
-// Mods from a .zip (the launcher's Import Mod; a folder the player picks comes here too, zipped by iOS: Mods.swift). Header-only, tested by tests/t_mods.c.
+// Mods from a .zip or a folder (the launcher's Import Mod, Mods.swift). Header-only, tested by tests/t_mods.c. A folder is read as it is (mods_zip_open_dir: its files
+// as entries named "<folder>/<path>", copied), not zipped by iOS first: NSFileCoordinator's zipping needs the app's own identity, which an app in LiveContainer lacks.
 // The archive's romfs folders become mods: each first path component named romfs (any case) ends a prefix ("romfs/", "Goku/romfs/",
 // "atmosphere/contents/0400486024DEC000/romfs/", "load/0400486024DEC000/Goku/romfs/"), and each prefix is one mod, named after the folder above it (a title ID, contents,
 // load, atmosphere are skipped) or the archive's name. An archive with no romfs folder whose files are game files (they name files the game has) is one mod: its files from
@@ -12,7 +13,7 @@
 #include <sys/mount.h>
 
 typedef struct { char *name; uint64_t csize, usize, off; uint32_t crc; uint16_t method, flags; uint8_t dir, link; } mods_zent;
-typedef struct { int fd; uint64_t size; mods_zent *e; size_t n; } mods_zip;
+typedef struct { int fd; uint64_t size; mods_zent *e; size_t n; char *root; int icloud; } mods_zip;   // root: a folder's parent (its entries are files under it); icloud: files still in iCloud
 
 static inline uint16_t mods_rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static inline uint64_t mods_rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
@@ -21,7 +22,7 @@ static inline uint64_t mods_rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8
 MODS_FN void mods_zip_close(mods_zip *z) {
     if (z->fd >= 0) close(z->fd);
     for (size_t i = 0; i < z->n; i++) free(z->e[i].name);
-    free(z->e); memset(z, 0, sizeof *z); z->fd = -1;
+    free(z->e); free(z->root); memset(z, 0, sizeof *z); z->fd = -1;
 }
 // What a file that is not a zip is, for the message
 static const char *mods_archive_kind(const uint8_t *h, size_t n) {
@@ -87,8 +88,57 @@ MODS_FN int mods_zip_open(mods_zip *z, const char *path, char *err, size_t errn)
     free(cd);
     return 1;
 }
+// A folder as an archive: its files (links left out) as entries "<the folder's name>/<path inside it>". A file the Files app has not downloaded yet is a hidden
+// ".<name>.icloud" placeholder: counted in icloud, so the import can say so
+static void mods_dir_walk(mods_zip *z, const char *base, const char *rel, size_t *cap, int depth) {
+    char dir[2048]; snprintf(dir, sizeof dir, "%s/%s", base, rel);
+    DIR *d = opendir(dir); if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (e->d_name[0] == '.' && mods_ends_with(e->d_name, ".icloud")) { z->icloud++; continue; }
+        char r[1024], full[2048]; struct stat st;
+        if (snprintf(r, sizeof r, "%s/%s", rel, e->d_name) >= (int)sizeof r) continue;
+        snprintf(full, sizeof full, "%s/%s", base, r);
+        if (lstat(full, &st)) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth < 32) mods_dir_walk(z, base, r, cap, depth + 1); continue; }
+        if (!S_ISREG(st.st_mode)) continue;
+        if (z->n == *cap && !(z->e = realloc(z->e, (*cap = *cap ? 2 * *cap : 256) * sizeof *z->e))) { MODS_LOG("[RED] mods: out of memory"); abort(); }
+        mods_zent *x = &z->e[z->n++]; memset(x, 0, sizeof *x);
+        x->name = strdup(r); x->usize = x->csize = (uint64_t)st.st_size; x->method = 0xffff;   // 0xffff: a file to copy
+    }
+    closedir(d);
+}
+MODS_FN int mods_zip_open_dir(mods_zip *z, const char *path, char *err, size_t errn) {
+    memset(z, 0, sizeof *z); z->fd = -1;
+    char p[1024]; strlcpy(p, path, sizeof p);
+    while (strlen(p) > 1 && p[strlen(p) - 1] == '/') p[strlen(p) - 1] = 0;
+    char *slash = strrchr(p, '/'); if (!slash || !slash[1]) return MODS_ERR("This folder can't be read.");
+    *slash = 0; z->root = strdup(*p ? p : "/");
+    size_t cap = 0; mods_dir_walk(z, z->root, slash + 1, &cap, 0);
+    if (!z->n && !z->icloud) return MODS_ERR("This folder can't be read, or it is empty (errno %d).", errno);
+    return 1;
+}
+MODS_FN int mods_copy_file(const char *src, const char *dst, uint64_t size, char *err, size_t errn) {
+    int in = open(src, O_RDONLY); if (in < 0) return MODS_ERR("%s can't be read (errno %d).", src, errno);
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (out < 0) { close(in); return MODS_ERR("%s can't be written (errno %d).", dst, errno); }
+    enum { B = 1 << 18 }; uint8_t *b = malloc(B); uint64_t got = 0; int ok = !!b;
+    while (ok) {
+        ssize_t r = read(in, b, B); if (r < 0 && errno == EINTR) continue;
+        if (r < 0) { ok = 0; snprintf(err, errn, "%s can't be read (errno %d).", src, errno); break; }
+        if (!r) break;
+        for (ssize_t w = 0; w < r;) { ssize_t k = write(out, b + w, (size_t)(r - w)); if (k < 0 && errno == EINTR) continue; if (k <= 0) { ok = 0; snprintf(err, errn, "The mod can't be written: the iPhone may be out of space (errno %d).", errno); break; } w += k; }
+        got += (uint64_t)r;
+    }
+    free(b); close(in); if (close(out)) ok = 0;
+    if (ok && got != size) { ok = 0; snprintf(err, errn, "%s changed while it was being copied.", src); }
+    if (!ok) unlink(dst);
+    return ok;
+}
 // Writes entry e to the new file dst. 1, or 0 with the reason in err (dst removed)
 MODS_FN int mods_zip_extract(const mods_zip *z, const mods_zent *e, const char *dst, char *err, size_t errn) {
+    if (z->root) { char src[2048]; snprintf(src, sizeof src, "%s/%s", z->root, e->name); return mods_copy_file(src, dst, e->usize, err, errn); }
     if (e->flags & 1) return MODS_ERR("The zip archive is password-protected. Unpack it with an app that knows the password, then import the folder.");
     if (e->method != 0 && e->method != 8) return MODS_ERR("The zip archive uses a kind of compression this app can't read (method %u). Unpack it in the Files app, then import the folder.", e->method);
     uint8_t lh[30];
@@ -202,12 +252,14 @@ static void mods_name_from(const char *prefix, size_t plen, const char *fallback
     if (!*out) strlcpy(out, "Mod", n);
 }
 
-// Imports the zip at path into mods_dir (made if needed). fallback: the name for a mod the archive does not name (the archive's file name). bundled/romfs: the game's files as
+// Imports the zip, or the folder, at path into mods_dir (made if needed). fallback: the name for a mod the archive does not name (the archive's file name). bundled/romfs: the game's files as
 // mods_prepare takes them, to recognize an archive with no romfs folder. Returns how many mods were added (their names in added, one per line), or 0 with the reason in msg.
 // On success msg says what was left out, or is empty
 MODS_FN int mods_import_zip(const char *path, const char *mods_dir, const char *fallback, const char *bundled, const char *romfs, char *msg, size_t msgn, char *added, size_t addedn) {
     char *err = msg; size_t errn = msgn; msg[0] = 0; if (added && addedn) added[0] = 0;
-    mods_zip z; if (!mods_zip_open(&z, path, msg, msgn)) { mods_zip_close(&z); return 0; }
+    struct stat sp; int folder = !stat(path, &sp) && S_ISDIR(sp.st_mode);
+    mods_zip z; if (!(folder ? mods_zip_open_dir(&z, path, msg, msgn) : mods_zip_open(&z, path, msg, msgn))) { mods_zip_close(&z); return 0; }
+    if (z.icloud) { mods_zip_close(&z); return MODS_ERR("Some of this folder's files are still in iCloud. In the Files app, touch and hold the folder, tap Download Now, then import it again."); }
     // the prefixes
     enum { MAXP = 16 }; char *pre[MAXP]; size_t plen[MAXP]; int np = 0, exefs = 0, cheats = 0, more = 0;
     for (size_t i = 0; i < z.n; i++) {

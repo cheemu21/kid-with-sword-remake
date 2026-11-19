@@ -257,6 +257,20 @@ int main(void) {
         text(P("notzip.bin"), 100);
         n = mods_import_zip(P("notzip.bin"), md, "No", NULL, NULL, msg, sizeof msg, added, sizeof added);
         CHECK(!n && strstr(msg, "isn't a zip"), "not a zip (%s)", msg);
+        // a folder, read as it is (LiveContainer: no zipping by the system): src1's romfs, its installer left out, named after the folder
+        n = mods_import_zip(P("src1"), md, "ignored", NULL, NULL, msg, sizeof msg, added, sizeof added);
+        CHECK(n == 1 && !strcmp(added, "src1") && exists(P("mods/src1/romfs/Model/a.bfres.zs")) && !exists(P("mods/src1/Installer.exe")), "a folder: %d %s | %s", n, added, msg);
+        x = slurp(P("src1/romfs/Tex/t.bntx.zs"), &a); y = slurp(P("mods/src1/romfs/Tex/t.bntx.zs"), &b);
+        CHECK(x && y && a == b && !memcmp(x, y, a), "a folder's file is copied as it is"); free(x); free(y);
+        n = mods_import_zip(P("Pack/"), md, "ignored", NULL, NULL, msg, sizeof msg, added, sizeof added);
+        CHECK(n == 2 && strstr(added, "Pack 2") && strstr(added, "Kid Goku 2"), "a folder with two romfs folders, a trailing slash: %s", added);
+        text(P("cloud/Mod/romfs/a.txt"), 5); text(P("cloud/Mod/romfs/.b.txt.icloud"), 5);
+        before = count_dir(md);
+        n = mods_import_zip(P("cloud/Mod"), md, "x", NULL, NULL, msg, sizeof msg, added, sizeof added);
+        CHECK(!n && strstr(msg, "iCloud") && count_dir(md) == before, "a folder with files still in iCloud: said so (%s)", msg);
+        mkdir(P("emptydir"), 0755);
+        n = mods_import_zip(P("emptydir"), md, "x", NULL, NULL, msg, sizeof msg, added, sizeof added);
+        CHECK(!n && strstr(msg, "empty"), "an empty folder (%s)", msg);
         // names
         char nm[64];
         mods_name_from("a/romfs/", 8, "f", nm, sizeof nm); CHECK(!strcmp(nm, "a"), "name: a");

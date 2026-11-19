@@ -1,5 +1,5 @@
 // Mods: replacement game files from the player (Documents/mods/<name>/romfs/..., the usual Switch layout), served over the game's files when they are on (dm/host/mods.h).
-// The launcher's Mods button (Launcher.swift) opens this panel: Import Mod (a .zip, or a folder, which iOS zips for us), the installed mods with a switch each, their order
+// The launcher's Mods button (Launcher.swift) opens this panel: Import Mod (a .zip), Import Folder, a .zip copied into the mods folder with Files, the installed mods with a switch each, their order
 // (the higher one wins when two change the same file) and delete. The order and the mods turned off are kept in UserDefaults; a mod folder put into Documents/mods with
 // the Files app shows up too, on. At Play, DM_MODS lists the romfs folders of the mods that are on, top first (ModStore.applyEnv); with none on it is unset and the game
 // starts exactly as without this feature.
@@ -116,34 +116,80 @@ final class ModStore: ObservableObject {
         }
     }
 
-    /// Imports a .zip, or a folder (zipped by iOS, which also downloads it from iCloud first); the new mods go to the top of the list, on
-    func importItem(at url: URL) {
+    /// Imports what the Files picker gave: .zip files or folders (several when the picker allows several: LiveContainer turns that on). Each is opened here, on the picker's
+    /// callback, before anything else can move it (a copy in the app's Inbox, or a folder opened in place), then read by dm_mods_import, which takes a folder as it is.
+    /// No NSFileCoordinator: in LiveContainer the app runs under the host's identity, and the picked file never reached the import (the owner's iPhone, L7.5-mods)
+    func importItems(_ urls: [URL]) {
+        guard !urls.isEmpty else { fputs("launcher: mods: the picker gave nothing\n", stderr); return }
+        let fm = FileManager.default
+        let picked: [(url: URL, scoped: Bool)] = urls.map { u in
+            let scoped = u.startAccessingSecurityScopedResource()
+            var d: ObjCBool = false
+            let there = fm.fileExists(atPath: u.path, isDirectory: &d)
+            fputs("launcher: mods: picked \(u.path) (\(there ? (d.boolValue ? "folder" : "file") : "NOT READABLE"), security scope \(scoped ? "yes" : "no"))\n", stderr)
+            return (u, scoped)
+        }
         busy = true; message = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            var d: ObjCBool = false
-            let folder = FileManager.default.fileExists(atPath: url.path, isDirectory: &d) && d.boolValue
-            let name = folder ? url.lastPathComponent : url.deletingPathExtension().lastPathComponent
-            var result: (count: Int, msg: String, added: [String]) = (0, "", [])
-            var err: NSError?
-            NSFileCoordinator().coordinate(readingItemAt: url, options: folder ? .forUploading : [], error: &err) { u in result = Self.importZip(u.path, name: name) }
-            if let err { result = (0, "The file couldn't be read: \(err.localizedDescription)", []) }
-            DispatchQueue.main.async {
-                self.busy = false
-                if result.count > 0 {
-                    let order = UserDefaults.standard.stringArray(forKey: Self.orderKey) ?? []
-                    UserDefaults.standard.set(result.added + order.filter { !result.added.contains($0) }, forKey: Self.orderKey)
-                    self.message = "Added \(result.added.joined(separator: ", ")). " + result.msg
-                } else { self.message = result.msg }
-                self.reload()
+            var added: [String] = [], notes: [String] = []
+            for p in picked {
+                var d: ObjCBool = false
+                let folder = fm.fileExists(atPath: p.url.path, isDirectory: &d) && d.boolValue
+                let r = Self.importZip(p.url.path, name: folder ? p.url.lastPathComponent : p.url.deletingPathExtension().lastPathComponent)
+                added += r.added
+                if !r.msg.isEmpty { notes.append(urls.count > 1 ? "\(p.url.lastPathComponent): \(r.msg)" : r.msg) }
+                if p.scoped { p.url.stopAccessingSecurityScopedResource() }
+                if p.url.path.contains("-Inbox/") || p.url.path.hasPrefix(fm.temporaryDirectory.path) { try? fm.removeItem(at: p.url) }   // the picker's copy
             }
+            DispatchQueue.main.async { self.finish(added: added, notes: notes) }
         }
+    }
+    /// .zip files put straight into the mods folder with the Files app (the way in when the picker does not work): imported when the panel opens, then removed.
+    /// One that can't be imported is renamed <name>.not-imported, so it is not tried again each time
+    func importDropped() {
+        guard !busy else { return }
+        let fm = FileManager.default
+        let files = ((try? fm.contentsOfDirectory(atPath: Self.dir.path)) ?? []).filter { n in
+            var d: ObjCBool = false
+            return !n.hasPrefix(".") && !n.hasSuffix(".not-imported") && fm.fileExists(atPath: Self.dir.appendingPathComponent(n).path, isDirectory: &d) && !d.boolValue
+        }
+        guard !files.isEmpty else { return }
+        busy = true; message = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            var added: [String] = [], notes: [String] = []
+            for f in files {
+                let u = Self.dir.appendingPathComponent(f)
+                fputs("launcher: mods: \(f) in the mods folder: importing\n", stderr)
+                let r = Self.importZip(u.path, name: u.deletingPathExtension().lastPathComponent)
+                added += r.added
+                if r.count > 0 { try? fm.removeItem(at: u) } else { try? fm.moveItem(at: u, to: u.appendingPathExtension("not-imported")) }
+                if !r.msg.isEmpty { notes.append("\(f): \(r.msg)") }
+            }
+            DispatchQueue.main.async { self.finish(added: added, notes: notes) }
+        }
+    }
+    private func finish(added: [String], notes: [String]) {
+        busy = false
+        if !added.isEmpty {   // new mods go to the top, on
+            let order = UserDefaults.standard.stringArray(forKey: Self.orderKey) ?? []
+            UserDefaults.standard.set(added + order.filter { !added.contains($0) }, forKey: Self.orderKey)
+        }
+        message = ((added.isEmpty ? [] : ["Added \(added.joined(separator: ", "))."]) + notes).joined(separator: " ")
+        reload()
+    }
+    /// Where the mods folder is in the Files app: On My iPhone › the app, then the folders under its Documents (in LiveContainer, the guest app's data folder inside the host's)
+    static var filesLocation: String {
+        let parts = dir.path.components(separatedBy: "/")
+        if let i = parts.firstIndex(of: "Containers"), i + 5 < parts.count, parts[i + 4] == "Documents" {   // /var/mobile/Containers/Data/Application/<UUID>/Documents/...
+            return (["On My iPhone", Bundle.main.bundlePath.contains("/Documents/Applications/") ? "LiveContainer" : "this app"] + parts[(i + 5)...]).joined(separator: " › ")
+        }
+        return dir.path
     }
     private static func importZip(_ path: String, name: String) -> (count: Int, msg: String, added: [String]) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var msg = [CChar](repeating: 0, count: 1024), added = [CChar](repeating: 0, count: 4096)
         let n = dm_mods_import(path, dir.path, name, &msg, msg.count, &added, added.count)
+        fputs("launcher: mods: import \(path): \(n) added: \(String(cString: msg))\n", stderr)
         return (Int(n), String(cString: msg), String(cString: added).split(separator: "\n").map(String.init))
     }
 }
@@ -152,7 +198,7 @@ final class ModStore: ObservableObject {
 struct ModsDrawer: View {
     @ObservedObject var store: ModStore
     let close: () -> Void
-    @State private var picking = false
+    @State private var picking: ModPicker.Kind?   // the picker's sheet: one for both rows, on the panel (a sheet per row was two presenters)
     @State private var editing = false
     @State private var deleting: ModStore.Mod?
 
@@ -169,24 +215,33 @@ struct ModsDrawer: View {
             }
             List {
                 Section {
-                    Button { picking = true } label: {
+                    Button { picking = .file } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "square.and.arrow.down").font(.system(size: 18)).foregroundStyle(LauncherTheme.paleGold)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Import Mod…").foregroundStyle(LauncherTheme.text)
-                                Text("A .zip file or a folder from Files").font(.caption).foregroundStyle(LauncherTheme.soft)
+                                Text("A .zip file from Files").font(.caption).foregroundStyle(LauncherTheme.soft)
                             }
                             Spacer()
                             if store.busy { ProgressView() }
                         }
                     }
                     .disabled(store.busy)
-                    // the sheet sits on the button, not on the Section (Launcher.swift CloudSavesSection: a Section hands its modifiers to every row)
-                    .sheet(isPresented: $picking) {
-                        ModPicker { url in picking = false; store.importItem(at: url) } onCancel: { picking = false }
+                    Button { picking = .folder } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "folder").font(.system(size: 18)).foregroundStyle(LauncherTheme.paleGold)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Import Folder…").foregroundStyle(LauncherTheme.text)
+                                Text("A mod folder (with romfs inside), unpacked").font(.caption).foregroundStyle(LauncherTheme.soft)
+                            }
+                        }
                     }
+                    .disabled(store.busy)
                 } footer: {
-                    if let m = store.message { Text(m) }
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let m = store.message, !m.isEmpty { Text(m).foregroundStyle(LauncherTheme.paleGold) }
+                        Text("If the picker shows a tick instead of importing, tap Open. Or copy the .zip into \(ModStore.filesLocation) with the Files app: it's imported when you open Mods.")
+                    }
                 }
                 .listRowBackground(LauncherTheme.row)
                 if !store.mods.isEmpty {
@@ -217,7 +272,10 @@ struct ModsDrawer: View {
         .background(LauncherTheme.panel)
         .compositingGroup()
         .overlay(alignment: .leading) { Rectangle().fill(LauncherTheme.line).frame(width: 1) }
-        .onAppear { store.reload() }
+        .onAppear { store.reload(); store.importDropped() }
+        .sheet(item: $picking) { kind in
+            ModPicker(kind: kind) { urls in picking = nil; store.importItems(urls) } onCancel: { picking = nil; fputs("launcher: mods: picker cancelled\n", stderr) }
+        }
         .confirmationDialog("Delete \(deleting?.id ?? "this mod")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible, presenting: deleting) { mod in
             Button("Delete Mod", role: .destructive) { store.delete(mod.id); deleting = nil }
             Button("Cancel", role: .cancel) { deleting = nil }
@@ -243,24 +301,29 @@ private struct ModRow: View {
     }
 }
 
-/// Files: a .zip (or another archive, so the import can say what it is) or a folder. .open, not .import: a folder can't be copied in whole, and the import reads it through a coordinator
-private struct ModPicker: UIViewControllerRepresentable {
-    let onPick: (URL) -> Void
+/// Files. A .zip (or another archive, so the import can say what it is) as a copy: the system copies it into the app first, so nothing has to be opened in place, which an
+/// app in LiveContainer can't do (LiveContainer turns every picker into a copying one, and may allow several picks). A folder is opened in place where the system allows it.
+struct ModPicker: UIViewControllerRepresentable {
+    enum Kind: String, Identifiable { case file, folder; var id: String { rawValue } }
+    let kind: Kind
+    let onPick: ([URL]) -> Void
     let onCancel: () -> Void
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let types: [UTType] = [.zip, .folder, .archive] + ["7z", "rar"].compactMap { UTType(filenameExtension: $0) }
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+        let picker = kind == .folder
+            ? UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+            : UIDocumentPickerViewController(forOpeningContentTypes: [.zip, .archive, .data] + ["7z", "rar"].compactMap { UTType(filenameExtension: $0) }, asCopy: true)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
+        fputs("launcher: mods: \(kind.rawValue) picker shown\n", stderr)
         return picker
     }
     func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
     func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick, onCancel: onCancel) }
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let onPick: (URL) -> Void
+        let onPick: ([URL]) -> Void
         let onCancel: () -> Void
-        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) { self.onPick = onPick; self.onCancel = onCancel }
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { if let u = urls.first { onPick(u) } else { onCancel() } }
+        init(onPick: @escaping ([URL]) -> Void, onCancel: @escaping () -> Void) { self.onPick = onPick; self.onCancel = onCancel }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { onPick(urls) }
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { onCancel() }
     }
 }
