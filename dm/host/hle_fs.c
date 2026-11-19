@@ -18,6 +18,7 @@
 #include <sys/clonefile.h>
 #include <sys/xattr.h>
 #include "romfs_image.h"
+#include "mods.h"
 #include "save_sync.h"
 
 #define RES_PATH_NOT_FOUND 0x202u      // fs module 2, description 1
@@ -166,15 +167,43 @@ static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_
 // DM_ROMFS_OVERLAY's folders, each preceded by its amiibo-nolimit/ subfolder where it has one: Ocarina of Time's Game/AmiiboSetting with every amiibo's daily limit off and the
 // resource size table entry it needs (scripts/oot_amiibo_overlay.py, which build_ipa.sh runs on the player's own RomFS image into the app's romfs_overlay). Only that subfolder: the
 // X line's per-mode resolution folders (handheld/, docked/, potato-*) are never served on this line, whose render scale is a patch (patches.py)
+// A folder that does not fit in dst is left out whole (and said so), never cut short into another path: mods.h mods_prepare keeps the list within the field
+static void rom_overlay_add(char *dst, size_t n, const char *root) {
+    if (strlen(dst) + !!dst[0] + strlen(root) >= n) { LOG("[RED] fs rom overlay: no room for %s; not served", root); return; }
+    if (dst[0]) strlcat(dst, ":", n);
+    strlcat(dst, root, n);
+}
 static void rom_overlay_expand(const char *env, char *dst, size_t n) {
     dst[0] = 0; char *roots = strdup(env); if (!roots) die("rom overlay allocation failed");
     char *save = NULL;
     for (char *root = strtok_r(roots, ":", &save); root; root = strtok_r(NULL, ":", &save)) {
         char sub[1100]; struct stat st; snprintf(sub, sizeof sub, "%s/amiibo-nolimit", root);
-        if (!stat(sub, &st) && S_ISDIR(st.st_mode)) { if (dst[0]) strlcat(dst, ":", n); strlcat(dst, sub, n); LOG("fs rom overlay: %s (amiibo: daily limit off)", sub); }
-        if (dst[0]) strlcat(dst, ":", n); strlcat(dst, root, n);
+        if (!stat(sub, &st) && S_ISDIR(st.st_mode)) { rom_overlay_add(dst, n, sub); LOG("fs rom overlay: %s (amiibo: daily limit off)", sub); }
+        rom_overlay_add(dst, n, root);
     }
     free(roots);
+}
+// The rom mount's overlay folders: DM_ROMFS_OVERLAY (the app's own replacements), with the player's enabled mods (DM_MODS) and their merged size table over it (mods.h).
+// Without DM_MODS it is DM_ROMFS_OVERLAY itself, as it always was. With it, the list is worked out at the first rom mount and again only when either variable changes. NULL: no overlay
+static const char *rom_overlay_env(void) {
+    const char *bundled = getenv("DM_ROMFS_OVERLAY"), *mods = getenv("DM_MODS");
+    if (!mods || !*mods) return bundled;
+    static char list[sizeof g_mnt[0].overlay], key[2 * sizeof g_mnt[0].overlay]; static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    char now[sizeof key]; snprintf(now, sizeof now, "%s\n%s", mods, bundled ? bundled : "");
+    pthread_mutex_lock(&lock);
+    if (strcmp(key, now)) {
+        strlcpy(key, now, sizeof key);
+        char b[1024]; const char *work = getenv("DM_MODS_WORK");
+        mods_stat st[MODS_MAX]; int n = mods_prepare(mods, bundled, envdir("DM_ROMFS", "romfs", b, sizeof b), getenv("DM_MODS_RSTB"), work && *work ? work : NULL, list, sizeof list, st, MODS_MAX);
+        char *all = strdup(mods), *save = NULL; int i = 0;
+        for (char *r = all ? strtok_r(all, ":", &save) : NULL; r && i < MODS_MAX; r = strtok_r(NULL, ":", &save), i++)
+            LOG("fs mod %d: %s: %d files%s, %d bigger than the originals, %d size table entries raised%s%s%s%s", i + 1, r, st[i].files, st[i].shadowed ? " (some under a mod above)" : "", st[i].bigger, st[i].raised,
+                st[i].untracked ? " [RED] some bigger files have no size table room" : "", st[i].own_table ? ", its own size table not served" : "", st[i].dropped ? " [RED] not served" : "", st[i].no_table && st[i].bigger ? " (no size table in this app)" : "");
+        free(all);
+        LOG("fs rom overlay with %d mod%s: %s", n, n == 1 ? "" : "s", list);
+    }
+    pthread_mutex_unlock(&lock);
+    return list[0] ? list : NULL;
 }
 // A path on an image mount: returns 1 with the mount in *mi and the entry in *k (-1 with errno set when there is none); 0 for a path on any other mount, or one an overlay folder (DM_ROMFS_OVERLAY) has, which then opens as a host file
 static int img_path(const char *p, int *mi, int64_t *k) {
@@ -208,7 +237,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-    const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
+    const char *overlay = !strcmp(name, "rom") ? rom_overlay_env() : NULL;
     if (overlay) rom_overlay_expand(overlay, g_mnt[g_nmnt].overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
@@ -562,7 +591,7 @@ HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host d
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) { dm_thread_service_request();
     (void)cache; (void)sz; char b[1024];
     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
-    const char *overlay = getenv("DM_ROMFS_OVERLAY");
+    const char *overlay = rom_overlay_env();
     if (r == RES_OK && overlay) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) {

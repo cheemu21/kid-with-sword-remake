@@ -311,6 +311,13 @@ if [ -f "$GD/amiibo.tsv" ]; then
   else t "amiibo: the list only"; fi
   MAPS+=("$P/romfs_overlay=$AOV")
 fi
+# Mods (the launcher's Mods button: Documents/mods, Mods.swift; dm/host/mods.h): the game's resource size table, stored uncompressed (the phone has no zstd decoder), so the host can
+# raise the entries of mod files bigger than the files they replace. The overlay's table where it has one (the amiibo entry raised), else the RomFS's (scripts/oot_mods_rstb.py).
+# A game without a RESTBL table, or a RomFS folder, gets none: mods are then served without raised entries, and the launcher says which files are bigger
+if [ -f "$ROMFS" ]; then
+  if python3 "$DM/../scripts/oot_mods_rstb.py" "$ROMFS" "$O/mods_rstb.bin" "${AOV:-}" > "$O/mods_rstb.log" 2>&1; then MAPS+=("$P/mods_rstb.bin=$O/mods_rstb.bin"); t "mods: size table ($(tail -1 "$O/mods_rstb.log"))"
+  else rm -f "$O/mods_rstb.bin"; t "mods: no size table ($(tail -1 "$O/mods_rstb.log"))"; fi
+fi
   if [ -d "$(dirname "$ROMFS")/html" ]; then MAPS+=("$P/html=$(dirname "$ROMFS")/html"); t "offline HTML pages: $(dirname "$ROMFS")/html"; fi   # beside its RomFS, where the host finds them (hle_web.c)
   if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/jit=$(dirname "$ROMFS")/jit"); t "nn::jit image: $(dirname "$ROMFS")/jit"; fi
   # the RomFS of the application's other programs (scripts/pack_nup.py: a Switch 2 Edition's Switch 1 program), which the game mounts by program index; in the app also with DM_COPY_ROMFS=NO (main.m)

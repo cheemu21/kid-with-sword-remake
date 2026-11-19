@@ -225,6 +225,11 @@ static NSString *program_env(void) {
         if ([fm fileExistsAtPath:ov isDirectory:&dir] && dir) { setenv("DM_ROMFS_OVERLAY", ov.fileSystemRepresentation, 0); fprintf(stderr, "boot: game file replacements %s\n", getenv("DM_ROMFS_OVERLAY")); }
         // The in-game menu's Amiibo list (GameMenu.swift) writes the chosen amiibo's ID into Documents/amiibo.txt; the host reads it at each scan (hle_sdk16.c StartDetection, amiibo.h dm_amiibo_select)
         if ([fm fileExistsAtPath:[ov stringByAppendingPathComponent:@"amiibo.tsv"]]) setenv("DM_AMIIBO", [doc stringByAppendingPathComponent:@"amiibo.txt"].fileSystemRepresentation, 0);
+        // Mods (Documents/mods, Mods.swift): the launcher sets DM_MODS at Play; the host merges their size table entries into a copy of the table the build stored
+        // uncompressed beside the overlay (build_ipa.sh, scripts/oot_mods_rstb.py), written into Documents/mods/.merged (hle_fs.c rom_overlay_env, mods.h)
+        NSString *rstb = [res stringByAppendingPathComponent:prog ? [prog stringByAppendingPathComponent:@"mods_rstb.bin"] : @"mods_rstb.bin"];
+        if ([fm fileExistsAtPath:rstb]) setenv("DM_MODS_RSTB", rstb.fileSystemRepresentation, 0);
+        setenv("DM_MODS_WORK", [doc stringByAppendingPathComponent:@"mods/.merged"].fileSystemRepresentation, 0);
     }
     // The RomFS of the application's other programs (scripts/pack_nup.py, a Switch 2 Edition's Switch 1 program), which the game mounts by program index (hle_fs.c): in the app beside its
     // RomFS, also when that RomFS is Documents/romfs.img

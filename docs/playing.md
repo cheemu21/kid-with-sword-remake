@@ -71,6 +71,19 @@ On the Mac, which has no NFC reader (and in any build, as a setting), an amiibo 
 
 To change figures while playing, make `DM_AMIIBO` the path of a text file that holds the ID (`DM_AMIIBO=/path/to/amiibo.txt`): the game reads it again at every scan, so write another ID into it before the next scan, or empty it for no amiibo. The figure's own data from a real amiibo is not read: the game sees a fresh figure the first time.
 
+## Mods
+
+On iPhone, the launcher's **Mods** button (under Play, beside All Settings) opens the mods panel. Mods replace game files: they are the usual Switch "romfs" mods, made for your version of the game (a mod for another version can crash it).
+
+- **Import Mod…** takes a **.zip** or a **folder** from the Files app (iCloud Drive, On My iPhone, a USB drive). The app finds the `romfs` folder inside, wherever it is (`romfs/`, `My Mod/romfs/`, `atmosphere/contents/<title ID>/romfs/`, `load/<title ID>/My Mod/romfs/`), and keeps only that: an installer, a readme, `exefs` patches and cheats in the same archive are left out. An archive with several `romfs` folders becomes several mods. A **7z** or **RAR** file can't be read on the phone: unpack it first (an app from the App Store, or on a computer), then import the folder.
+- Each mod has a **switch**. A new mod is on. What you turn off stays off.
+- **Order:** when two mods change the same file, the one **higher in the list** is used, and the row of the one below says so. Tap **Change Order** and drag. A new mod goes to the top.
+- **Delete:** swipe the row left (or touch and hold it).
+- Mods load when you press **Play**: change them, then play. With none on, the game starts exactly as without mods. The app's own amiibo files stay under every mod.
+- You can also copy a mod folder into the app's `mods` folder with the Files app (On My iPhone › the app › mods › *your mod* › romfs › …).
+
+**Bigger files.** The game reserves memory for each file from its resource size table, so a replacement bigger than the original can run that out and crash the game. When a mod's file is bigger, the app makes room for it in a copy of the table at Play, and the mod's row says how many files that is. An orange note means it can't: a file the table has no entry for, or a copy of the app built before mods (build it again from this version and it can). A mod that brings its own copy of the table is fine: the app uses its merged one.
+
 ## Settings in a file
 
 Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.

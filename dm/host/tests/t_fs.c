@@ -196,6 +196,23 @@ int main(void) {
     CHECK(read_fs("rom:\\data\\over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:\\data\\base", got, sizeof got) && !strcmp(got, "only-base"), "backslashes separate as slashes do, in both layers");
     CHECK(h_fs_OpenFile(&rh, "rom:/data/base", MODE_READ) == RES_OK && rh && !(rh & 15), "a folder file's handle is 16-byte aligned, as a Horizon FileAccessor pointer is (%#llx)", (unsigned long long)rh); h_fs_CloseFile(rh);
     g_nmnt = 0;
+    {   // mods (DM_MODS, mods.h; no size table here): the first mod over the second, both over the app's overlay over the game; an empty DM_MODS is the overlay alone again
+        char m[2][1200], d[1300], mods[2500];
+        for (int i = 0; i < 2; i++) {
+            snprintf(m[i], sizeof m[i], "%s/mod%d", root, i + 1); mkdir(m[i], 0755); strlcat(m[i], "/romfs", sizeof m[i]); mkdir(m[i], 0755);
+            snprintf(d, sizeof d, "%s/data", m[i]); mkdir(d, 0755);
+            snprintf(fn, sizeof fn, "%s/same", d); put(fn, i ? "mod2" : "mod1");
+        }
+        snprintf(fn, sizeof fn, "%s/data/base", m[1]); put(fn, "mod2-base"); snprintf(fn, sizeof fn, "%s/data/new", m[1]); put(fn, "mod2-new");
+        snprintf(mods, sizeof mods, "%s:%s", m[0], m[1]); setenv("DM_MODS", mods, 1);
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount RomFS with two mods");
+        CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "mod1"), "mods: the first mod's file wins over the second's and the overlay's");
+        CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "mod2-base"), "mods: the second mod's file wins over the game's");
+        CHECK(read_fs("rom:/data/over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:/data/new", got, sizeof got) && !strcmp(got, "mod2-new"), "mods: the overlay's own file, and a file only a mod has");
+        g_nmnt = 0; setenv("DM_MODS", "", 1);
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay") && !read_fs("rom:/data/new", got, sizeof got), "mods: none on: the overlay and the game as before");
+        g_nmnt = 0; unsetenv("DM_MODS");
+    }
     unsetenv("DM_ROMFS_OVERLAY");
     {   // game files that are neither a folder nor a file (a stale path, a fifo) stop the rom mount with a FATAL line, in a child so the abort does not end this test
         char gone[1200], fifo[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(fifo, sizeof fifo, "%s/fifo", root); snprintf(out, sizeof out, "%s/fatal.txt", root);

@@ -85,6 +85,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
 	$(B)/t_amiibo
+	TMPDIR="$(abspath $(B))" $(B)/t_mods
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
@@ -310,6 +311,13 @@ $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
 $(B)/t_amiibo: t_amiibo.c ../amiibo.h | $(B)
 	$(CLANG) -O1 -g -Wall -Wextra -Werror -I.. -o $@ t_amiibo.c
+# mods.h / mods_zip.h: the overlay list DM_MODS makes, the merged size table, the zip import (uses zip(1) and ditto, which every Mac has; zstd where installed)
+run: $(B)/t_mods
+$(B)/t_mods: t_mods.c ../mods.h ../mods_zip.h ../romfs_image.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -I.. -o $@ t_mods.c -lcompression
+.PHONY: mods
+mods: $(B)/t_mods
+	TMPDIR="$(abspath $(B))" $(B)/t_mods
 $(B)/t_haptics_apple: t_haptics_apple.m ../haptics_apple.m ../haptics_apple.h ../hle_haptics.c ../hle_haptics.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_haptics_apple.m ../hle_haptics.c -framework Cocoa -framework GameController -framework CoreHaptics -framework IOKit
 $(B)/t_time: t_time.c ../hle_time.c ../hle_table.c ../hle.h ../dm.h $(GAME_H) | $(B)
