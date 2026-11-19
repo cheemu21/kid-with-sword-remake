@@ -32,14 +32,18 @@
 > [!NOTE]
 > **Not an emulator.** The game's own code runs directly on the Apple chip, with its graphics rebuilt on Metal. Nothing from the game is in this repository or in any release: you build the app yourself from your own copy of the game. Not affiliated with Nintendo.
 
-## Latest: L6.3 (pre-release)
+## Latest: L7.5
 
-The latest nxnative engine with this port's iPhone fixes on top: the white screen after pulling the Master Sword fixed, and no more once-a-second hitches after an area change. Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for what changed in each build.
+L7 moves the port onto the newest nxnative engine and aims at one thing: **stable, steady play on more iPhones, with the app staying under 5 GB of memory.** Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for older builds.
 
-**Coming in the next build (in testing now):**
+**New since L6:**
 
-- **A Mac app with the same launcher as the iPhone**, made for the Mac: a resizable window, keyboard shortcuts, your own background picture, and the microphone ocarina. See [Mac app](#mac-app).
-- **A simpler iPhone launcher.** Settings that only slow the game down on a phone are now hidden there: Upscaling, Dynamic Resolution, Game's Upscaler (the iPhone always uses MetalFX), Metal 4 pipelines, Pipeline prebuild and the encoder thread. They stay on the Mac, and Wide view stays on both.
+- **Texture Memory Saver** (on by default on iPhone): the two finest detail levels of the game's large textures are left out, which costs little on a phone screen and brings the peak from about 5.2 GB to under 5 GB on an iPhone 18 Pro.
+- **No memory spikes at area loads**: texture uploads go to the GPU in batches of at most 48 MB.
+- **Lighter frame generation**: the in-between frames are made at 0.6 of the picture's size, about 2 ms of GPU time, so 30 fps with frame generation drops far fewer frames.
+- **Render Scale down to 0.25**, labelled **Ultra Potato Mode 🥔**, for older phones.
+- **The Mac app** with the same launcher as the iPhone, and a **simpler iPhone launcher** that only shows the settings that help a phone. The Performance HUD and the launcher picture are back.
+- **Better freeze reports** (L7.5): if the picture stops for 5 seconds, `log.txt` now says which thread holds things up and where, so a freeze at a world change can be tracked down from one log.
 
 ## Features
 
@@ -51,6 +55,8 @@ The latest nxnative engine with this port's iPhone fixes on top: the white scree
 | 📱 **Wide view** | Fills the iPhone's screen at its own shape, nothing stretched |
 | 🎵 **Ocarina with your microphone** | Hum or whistle the notes into your iPhone's or Mac's microphone to play the ocarina |
 | 🛡️ **Amiibo** | From a list, a real figure over NFC, or Shortcuts |
+| 🧠 **Texture Memory Saver** | Keeps the app under 5 GB, on by default on iPhone |
+| 🥔 **Ultra Potato Mode** | Render Scale down to 0.25 for older phones |
 | 💻 **Mac app** | The same launcher, made for the Mac |
 
 In detail:
@@ -66,14 +72,15 @@ In detail:
 - **Amiibo**: pick one from an in-game list, scan a real figure with the iPhone's NFC reader, or tap one through Shortcuts in LiveContainer.
 - **Touch controls**, and any controller iOS supports.
 - **No long freezes when a new shader appears**: a new pipeline gets at most 50 ms of a frame, and is built in the background after that.
-- **Steady after area changes**: unused render targets are freed a few at a time, so memory stays near 5 GB without hitches.
+- **Steady after area changes**: unused render targets are freed a few at a time, and texture uploads go in batches of at most 48 MB, so memory stays under 5 GB without spikes.
+- **Texture Memory Saver**: the finest two detail levels of large textures are left out (All Settings → Performance), on by default on iPhone.
 - **Cutscenes in time with their sound** at 30 fps.
 
 ## Requirements
 
 - **To build:** an Apple silicon Mac with macOS 26.6 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.2) 27.2 with its iOS platform, [Homebrew](https://brew.sh) and Python 3.12 or newer. About 100 GB of free disk for the first build (the game's files, both shader sets and their compile cache).
 - **The game:** your own dump of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2, base game plus update v131072.
-- **iPhone:** iOS 26 or later. Tested on an **iPhone 18 Pro (12 GB)**. An iPhone 17 Pro should run it. Phones with 8 GB (iPhone 15 Pro, 16 Pro) are untested and may be closed by iOS for memory: the game uses about 5 GB.
+- **iPhone:** iOS 26 or later. Tested on an **iPhone 18 Pro (12 GB)**. The aim of L7 is the **iPhone 15 Pro and newer**: with the Texture Memory Saver the game stays under 5 GB, which an 8 GB phone can hold, but the 15 Pro and 16 Pro are still untested. On those, start with Render Scale 0.5 or lower.
 - **Storage on the phone:** keep at least 15 GB free. The game stops itself under 5 GB free.
 
 ## Build
@@ -122,6 +129,8 @@ DM_QOS_EDGES=45,59
 DM_NVN_GPUPROF=every:600
 DM_BOOTPROF=1
 DM_GUEST_FILE=1
+DM_NVN_TEX_MIP_LEVELS=2
+DM_FRAMEGEN_SCALE=0.6
 ```
 
 ## Install and play
@@ -154,8 +163,9 @@ The Mac build compiles its own shaders and makes the pipelines for your Mac's GP
 
 | Setting | Value |
 |---|---|
-| Render Scale | **0.5–0.6** (lower barely helps: this game's cost is mostly geometry) |
+| Render Scale | **0.5–0.6** on a Pro iPhone; **0.25 (Ultra Potato Mode 🥔)** if an older phone struggles |
 | Frame Limit | **30 with Frame Generation**, or **60** while the phone is cool |
+| Texture Memory Saver | **On** (the default on iPhone) |
 | Wide view | Your choice: it costs little |
 | Performance HUD | Off unless you are measuring |
 
@@ -167,8 +177,9 @@ Start with a cool phone: when iOS reports the phone as hot, it halves the CPU's 
 
 - In heavy areas the iPhone's GPU is near its limit at 30 fps; with frame generation on, some frames drop there.
 - Long sessions heat the phone, and iOS lowers its clocks.
+- **Being fixed:** a member's game froze at a change between areas (L7.4). L7.5 logs where such a freeze sits: if it happens to you, wait 10 seconds, then send `log.txt`.
 - The first area after starting can freeze for up to half a second while its textures load.
-- Area loads can take a frame of 200–300 ms.
+- Area loads can take a frame of 300–700 ms.
 - If the picture ever stops for 5 seconds, a watchdog writes the game's threads to `log.txt`: send that log.
 
 ## Credits
