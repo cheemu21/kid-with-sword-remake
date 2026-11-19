@@ -706,6 +706,37 @@ int thr_find_by_name(const char *name, pthread_t *out) {
     return ok;
 }
 // State dump (called from crash.c on watchdog / crash; read-only, takes no lock): what each guest thread is waiting on and where its most recent SVC was issued from
+// kid-with-sword-remake L7.5: the host frames of a thread for the live dumps (the stall watchdog, the app leaving the screen). Suspended only while its registers and frame-pointer chain
+// are copied into pcs (thread_get_state and vm_read_overwrite: system calls, no lock, no allocation), resumed before anything is printed or looked up, so a thread stopped while it holds the
+// log's, the allocator's or dyld's lock cannot stop the dump. A member's log (L7.4) froze at a world change: the main thread and three workers waited for a game lock whose owner
+// ('OptimizeChangeBanc') sat in host code with no CPU for 28 s, and the dump could not say where. Returns the frames copied (pc, lr, then the fp chain)
+static int host_frames(mach_port_t port, uint64_t *pcs, int max) {
+    if (!port || port == mach_thread_self() || thread_suspend(port) != KERN_SUCCESS) return 0;
+    int n = 0; arm_thread_state64_t st; mach_msg_type_number_t c = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(port, ARM_THREAD_STATE64, (thread_state_t)&st, &c) == KERN_SUCCESS) {
+        uint64_t fp = __darwin_arm_thread_state64_get_fp(st);
+        pcs[n++] = __darwin_arm_thread_state64_get_pc(st); if (n < max) pcs[n++] = __darwin_arm_thread_state64_get_lr(st);
+        while (n < max && fp) { uint64_t fr[2]; vm_size_t g = 0;
+            if (vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &g) || g != 16 || fr[0] <= fp) break;
+            pcs[n++] = fr[1]; fp = fr[0]; }
+    }
+    thread_resume(port);
+    return n;
+}
+// Print frames copied by host_frames: a guest module as module+offset, host code as image+offset (atos -o <the app's binary> -l <load address> reads them; the image's own offset is
+// printed so the build's unstripped binary symbolizes it) with the nearest exported symbol when dladdr has one
+static void host_frames_print(const char *head, const uint64_t *pcs, int n) {
+    char line[1600]; int p = snprintf(line, sizeof line, "%s", head);
+    for (int k = 0; k < n && p < (int)sizeof line - 120; k++) {
+        uint64_t pc = pcs[k] & 0x0000007fffffffffull; Dl_info di; module_t *m = module_of((void *)pc);
+        if (m) p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, pc - (uint64_t)m->base);
+        else if (dladdr((void *)pc, &di) && di.dli_fname) { const char *b = strrchr(di.dli_fname, '/'); b = b ? b + 1 : di.dli_fname;
+            p += snprintf(line + p, sizeof line - p, " %s+%#llx", b, pc - (uint64_t)di.dli_fbase);
+            if (di.dli_sname) p += snprintf(line + p, sizeof line - p, "(%s+%#lx)", di.dli_sname, (unsigned long)(pc - (uint64_t)di.dli_saddr)); }
+        else p += snprintf(line + p, sizeof line - p, " %#llx", pc);
+    }
+    fprintf(stderr, "%s\n", line);
+}
 // During a state dump, take the backtrace of other guest threads: suspend → read registers → walk the frame pointer chain (both guest code and gate blocks keep the x29 chain) → resume; only main / sdk frames are printed
 static void thr_bt(thr_t *t) {
     if (!t->mport || t->exited || t->mport == mach_thread_self()) return;
@@ -741,7 +772,8 @@ static void thr_bt(thr_t *t) {
     }
     thread_resume(t->mport);
 }
-static int g_dump_live;   // svc_thread_dump_live: no thread is suspended
+static int g_dump_live;   // svc_thread_dump_live: no thread is left suspended (host_frames stops one only while it copies its frames)
+static int g_dump_host;   // a live dump that also lists the host's threads (the stall watchdog's)
 void svc_thread_dump(void) {
     static const char *kinds[] = {"running/not waiting", "mutex", "condvar", "address", "sync object"};
     int nh = 0; for (int i = 1; i < MAX_H; i++) nh += g_h[i].type != O_FREE;
@@ -756,7 +788,10 @@ void svc_thread_dump(void) {
             if (thread_info(t->mport, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) == KERN_SUCCESS)
                 cpu = bi.user_time.seconds + bi.user_time.microseconds / 1e6 + bi.system_time.seconds + bi.system_time.microseconds / 1e6; }
         char own[96] = ""; if (t->wkind == 1 && t->waddr) { uint32_t w = 0; vm_size_t g2 = 0;   // 0x40000000 | Lock wait: lock word = owner handle | 0x40000000
-            if (!vm_read_overwrite(mach_task_self(), t->waddr, 4, (vm_address_t)&w, &g2)) snprintf(own, sizeof own, " owner %#x", w & ~WAITERS_BIT); }
+            if (!vm_read_overwrite(mach_task_self(), t->waddr, 4, (vm_address_t)&w, &g2)) { uint32_t ow = w & ~WAITERS_BIT; thr_t *o = NULL; char onb[32];   // the owner by handle, or by kernel ID (SDK 22)
+                for (thr_t *c = g_all; c && !o; c = c->all) if (c->handle == ow || (uint32_t)c->id == ow) o = c;
+                if (o) snprintf(own, sizeof own, " owner %#x = %#x '%s'%s", ow, o->handle, thr_name(o, onb, sizeof onb), o->exited ? " (exited)" : "");
+                else snprintf(own, sizeof own, " owner %#x (no such thread)", ow); } }
         if (t->wkind == 2 && t->waddr) { uint32_t w = 0, k = 0; vm_size_t g2 = 0;              // Condition wait: current values of the associated lock word and the condition key (the deadlock dump lacked this item)
             vm_read_overwrite(mach_task_self(), t->waddr, 4, (vm_address_t)&w, &g2); vm_read_overwrite(mach_task_self(), t->wkey, 4, (vm_address_t)&k, &g2);
             snprintf(own, sizeof own, " lock word %#x condvar key %#llx=%#x wait #%llu", w, t->wkey, k, (unsigned long long)t->wseq); }   // wait #: the order the waiters arrived in, which SignalProcessWideKey wakes them in at equal priority
@@ -785,6 +820,23 @@ void svc_thread_dump(void) {
                 q += snprintf(sl + q, sizeof sl - q, " | x19=%#llx x20=%#llx x21=%#llx x22=%#llx x23=%#llx x24=%#llx x25=%#llx x26=%#llx x27=%#llx x28=%#llx", sr[19], sr[20], sr[21], sr[22], sr[23], sr[24], sr[25], sr[26], sr[27], sr[28]);
                 fprintf(stderr, "%s\n", sl); } }
         if (!g_dump_live) thr_bt(t);
+        else if (!t->wkind && t->started && !t->exited && t->mport) {   // not in a guest wait: where in the host it is (L7.5), and what the scheduler thinks of it
+            uint64_t pcs[24]; int nf = host_frames(t->mport, pcs, 24); char hd[200];
+            snprintf(hd, sizeof hd, "[dm]   %#x id %#llx not in a guest wait: sleeping %d native wait %d pause %d host work %d; host frames:", t->handle, (unsigned long long)t->id,
+                     (int)t->sleeping, t->native_wait, (int)t->pause_req, t->host_work ? (int)*t->host_work : -1);
+            host_frames_print(hd, pcs, nf);
+        }
+    }
+    if (g_dump_live && g_dump_host) {   // L7.5: the host's own threads too (a lock a stuck guest thread waits for may be held by one), frames copied with no thread left suspended
+        thread_act_array_t hs; mach_msg_type_number_t nh2 = 0;
+        if (task_threads(mach_task_self(), &hs, &nh2) == KERN_SUCCESS) {
+            for (mach_msg_type_number_t i = 0; i < nh2; i++) {
+                int guest = 0; for (thr_t *t = g_all; t; t = t->all) if (t->mport == hs[i]) { guest = 1; break; }
+                if (!guest && hs[i] != mach_thread_self()) { uint64_t pcs[16]; int nf = host_frames(hs[i], pcs, 16); char hd[64]; snprintf(hd, sizeof hd, "[dm] host thread %#x:", hs[i]); if (nf) host_frames_print(hd, pcs, nf); }
+                mach_port_deallocate(mach_task_self(), hs[i]);
+            }
+            vm_deallocate(mach_task_self(), (vm_address_t)hs, nh2 * sizeof *hs);
+        }
     }
     // Threads created by the host itself (graphics present, audio, movie decoding, etc.): not in the guest thread table, enumerated as mach threads, the first 12 frames symbolized with dladdr
     thread_act_array_t ths; mach_msg_type_number_t nth = 0;
@@ -820,7 +872,7 @@ void svc_thread_dump(void) {
 void svc_thread_dump_live(void) {
     int got = 0; for (int i = 0; i < 200 && !(got = !pthread_mutex_trylock(&G)); i++) usleep(1000);
     if (!got) { fprintf(stderr, "[dm] thread dump skipped: the thread table stayed busy for 200 ms\n"); return; }
-    g_dump_live = 1; svc_thread_dump(); g_dump_live = 0;
+    g_dump_live = 1; g_dump_host = 1; svc_thread_dump(); g_dump_live = 0; g_dump_host = 0;
     pthread_mutex_unlock(&G);
 }
 // DM_THREAD_DUMP_AT=<s> (diagnostic): the live dump that many seconds after start, as the iPhone prints it when the app leaves the screen
@@ -1209,7 +1261,10 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         if (ld32(addr) == ((uint32_t)regs[0] | WAITERS_BIT)) { t->waddr = addr; t->wtag = (uint32_t)regs[2];
             // Under DM_QOS_MAP the owner runs at least at this thread's class until the lock is handed over (the Horizon kernel lends the waiter's priority the same way): a user-interactive
             // waiter is never held up by a utility-class owner on a slow core
+            // The lock word's owner is the thread's handle up to SDK 21 and its kernel ID from SDK 22 (thread.c, TLR[0x110]): a handle lookup alone found no owner on SDK 22 games (Ocarina of
+            // Time, SDK 22.2.8), so a user-interactive main thread waiting for a user-initiated owner lent it nothing (L7.5)
             thr_t *o = g_qos_map ? h_peek((uint32_t)regs[0], O_THREAD) : NULL;
+            if (g_qos_map && !o) for (thr_t *c = g_all; c; c = c->all) if (!c->exited && (uint32_t)c->id == (uint32_t)regs[0]) { o = c; break; }
             pthread_override_t ov = o && o->pt && !o->exited && t->qos > o->qos ? pthread_override_qos_class_start_np(o->pt, (qos_class_t)t->qos, 0) : NULL;
             r = block(t, 1, -1);
             if (ov) pthread_override_qos_class_end_np(ov); }
