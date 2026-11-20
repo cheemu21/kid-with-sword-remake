@@ -1451,6 +1451,11 @@ static void rc_gpu_write(uint64_t dst, uint64_t n) {
 // count when the report was encoded on the submit thread came too late (131,072 corrections in a session, and the body still vanished): the game had read the record already.
 // Only a count of 0 that may be stale is replaced: one never written (count and timestamp 0), or one whose previous report on that record has not completed yet (g_vis_pend, by
 // address; a collision counts as pending). A 0 the last completed report wrote stays, so an object that really is hidden stays culled. The completion writes the real count over it
+// DM_NVN_VISLOG=<index count> (diagnostic, kid-with-sword-remake L7.9): the samples-passed reports whose counting window holds a draw of that many indices are logged with the
+// count the GPU gave them (each 0, and 1 in 30 of the others), and the window report every 600 frames says how often that mesh was drawn: a mod's piece the game stops drawing
+// (the Goku mod's body, 20,598 indices) shows whether its query read 0 before it went
+static int g_vislog = -1, g_vislog_mark; static _Atomic uint64_t g_vislog_draws, g_vislog_reports, g_vislog_zero;
+static int vislog_on(void) { if (g_vislog < 0) { const char *e = getenv("DM_NVN_VISLOG"); g_vislog = e ? atoi(e) : 0; if (g_vislog) MLOG("DM_NVN_VISLOG=%d: queries around draws of %d indices are logged", g_vislog, g_vislog); } return g_vislog; }
 static uint64_t g_vis_prov; static _Atomic int32_t g_vis_pend[4096];
 static unsigned vis_ph(uint64_t a) { return (unsigned)(((a >> 4) * 0x9E3779B97F4A7C15ull) >> 52); }
 static int vis_prov_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_VIS_PROVISIONAL"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_VIS_PROVISIONAL=0: a samples-passed record holds what it held until its submission completes"); } return on; }
@@ -2757,7 +2762,9 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             if (ops[i].mode == VIS_ZERO) { g_vis_acc = 0; continue; }
             vis_list *l = ops[i].vis;
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); vis_report_done(ops[i].addr); }
+            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); vis_report_done(ops[i].addr);
+                if (ops[i].type & 0x80000000u) { uint64_t nr = atomic_fetch_add(&g_vislog_reports, 1) + 1; if (!g_vis_acc) atomic_fetch_add(&g_vislog_zero, 1);
+                    if (!g_vis_acc || nr % 30 == 1) MLOG("[vislog] frame %llu record %#llx: %llu samples passed (report %llu, %llu of them 0)", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)ops[i].addr, (unsigned long long)g_vis_acc, (unsigned long long)nr, (unsigned long long)atomic_load(&g_vislog_zero)); } }
         }
         else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, off), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
@@ -5415,6 +5422,7 @@ void mtl_preread(const void *mem, uint64_t size) {
     });
 }
 static void preread_report(unsigned long long frame) {
+    if (g_vislog > 0) MLOG("[vislog] up to frame %llu: the %d-index mesh drawn %llu times, its queries reported %llu times, %llu of them 0", frame, g_vislog, (unsigned long long)atomic_load(&g_vislog_draws), (unsigned long long)atomic_load(&g_vislog_reports), (unsigned long long)atomic_load(&g_vislog_zero));
     if (atomic_load(&g_trickle_n)) MLOG("[trickle] up to frame %llu: %llu pools, %.0f MB put into the residency set ahead of the raw memory table", frame, (unsigned long long)atomic_load(&g_trickle_n), atomic_load(&g_trickle_bytes) / 1048576.0);
     if (g_preread <= 0) return;
     MLOG("[preread] up to frame %llu: %llu ranges, %.0f MB asked to be read ahead, %.1f ms in the calls, %llu failed (range gone), %llu skipped (asked within 2 s)", frame, (unsigned long long)atomic_load(&g_preread_n),
@@ -15529,6 +15537,7 @@ static int skip_fs_draw(NvProg *pr) {
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
+    if (vislog_on() && (int)(dw ? dw->count : di->count) == g_vislog) { g_vislog_mark = 1; atomic_fetch_add_explicit(&g_vislog_draws, 1, memory_order_relaxed); }   // DM_NVN_VISLOG
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
         PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
            p && p->sh[0] ? p->sh[0]->key : "-", p && p->sh[1] ? p->sh[1]->key : "-", p && p->sh[2] ? p->sh[2]->key : "-",
@@ -17478,7 +17487,7 @@ void mtl_exec(const uint8_t *p) {
                     if (!g_vis_on) {   // a report with no reset before it: the counter runs from the queue's creation, so counting starts here (Occlusion queries)
                         g_vis_on = 1; g_vis_counting = 1; MLOG("occlusion queries: samples passed reported with no ResetCounter before it: counting from this report");
                         if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts at a report: render pass split here", g_stat_pass); rp_end(); } }
-                    hw_note(ad); post((post_op){3, NULL, VIS_REPORT, 0, ad, (uint32_t)t, vis_snapshot()}); vis_clear(); vis_need_scan(p + h.size); }   // written at completion, as a counter report
+                    hw_note(ad); post((post_op){3, NULL, VIS_REPORT, 0, ad, (uint32_t)t | (g_vislog_mark ? 0x80000000u : 0), vis_snapshot()}); g_vislog_mark = 0; vis_clear(); vis_need_scan(p + h.size); }   // written at completion, as a counter report
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
             case OP_RENDER_COND: { const p_render_cond *rc = a;   // SetRenderEnable / SetRenderEnableConditional (hle_nvn.c)
@@ -17491,6 +17500,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("Y fence_sync cmd=%p sync=%p fence=%llu", p, (void *)s, (unsigned long long)s->fence); break; }
             case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); g_cnt_reset[t & 31]++; PD("Q reset type=%llu cmd=%p", (unsigned long long)t, p);
                 if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
+                    g_vislog_mark = 0;
                     g_vis_on = 1; g_vis_counting = 1; vis_clear(); post((post_op){3, NULL, VIS_ZERO, 0, 0, (uint32_t)t, NULL}); vis_need_scan(p + h.size);
                     // The first reset can come inside a render pass that was begun without a visibility buffer (Octopath Traveler 0: Unreal's occlusion queries, once at boot): split the pass
                     // here, so the continuation is begun with the buffer and its samples are counted (they used not to be: RED "occlusion query counting began in a pass without a visibility buffer")
