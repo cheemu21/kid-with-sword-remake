@@ -9746,6 +9746,36 @@ static int arch_vm_room(uint64_t *free, uint64_t *largest) {
     if (prev < hi) { uint64_t gap = hi - prev; *free += gap; *largest = MAX(*largest, gap); }
     return 1;
 }
+// The device archive's stamp: the system build, the GPU and PSO_ARCH_VERSION, in <archive>/archive.stamp. A pipeline's key (arch_key) covers its libraries' bytes and its
+// descriptor, not the compiler that made it nor the host code that captured or compacted it, and Metal keeps [[invariant]] positions equal only between pipelines one compiler
+// made the same way. Ocarina of Time (kid-with-sword-remake, 2026-11-20): a mod that leaves Link's tunic body (piece #23) as the only piece drawn showed nothing on an iPhone 18
+// Pro. The body's depth pre-pass and its colour pass (depth EQUAL, other vertex shaders) disagreed with the pipelines from an archive written two days earlier by an older build;
+// the same pipelines compiled in this run (DM_PSO_ARCHIVE=off, or DM_PSO_MTL4=0), or written to a fresh archive and read back at the next start, drew it. Which step made the old
+// ones differ was not found (the files are the phone GPU's binaries). So an archive whose stamp differs, or that has none, is retired whole at start (arch_retire: DM_OBSOLETE's
+// folder or deleted) and built again; bump PSO_ARCH_VERSION when the way pipelines are compiled, captured or compacted changes. The prebuild tool stamps the archive it fills as a
+// run does (it compiles on this system); its bundle form's work folder (DM_PSO_PREBUILD_OUT), made for an app, is left as it is. Returns the files retired
+enum { PSO_ARCH_VERSION = 1 };
+static NSString *arch_stamp(void) {   // (a test's stand-in device may have no name)
+    NSString *gpu = [(id)g_dev respondsToSelector:@selector(name)] ? g_dev.name : nil;
+    return [NSString stringWithFormat:@"%@gpu\t%@\narchive\t%d\n", arch_os_build(), gpu ?: @"?", PSO_ARCH_VERSION];
+}
+static int arch_stamp_check(NSString *dir) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *path = [dir stringByAppendingPathComponent:@"archive.stamp"], *want = arch_stamp(), *have = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if ([have isEqualToString:want]) return 0;
+    int n = 0, left = 0; unsigned long long bytes = 0;
+    for (NSString *f in [[fm contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]]) {
+        NSString *p = [dir stringByAppendingPathComponent:f]; unsigned long long size = [[fm attributesOfItemAtPath:p error:nil] fileSize];
+        if (arch_retire(p)) { n++; bytes += size; } else left++;
+    }
+    if (n || left) MLOG("pipeline archive: written under another system build, GPU or archive version (%s, now %s): %d files, %.1f MB %s, built again from this start%s",
+                        have ? [[have stringByReplacingOccurrencesOfString:@"\n" withString:@"; "] stringByReplacingOccurrencesOfString:@"\t" withString:@" "].UTF8String : "no stamp",
+                        [[want stringByReplacingOccurrencesOfString:@"\n" withString:@"; "] stringByReplacingOccurrencesOfString:@"\t" withString:@" "].UTF8String,
+                        n, bytes / 1048576.0, getenv("DM_OBSOLETE") && *getenv("DM_OBSOLETE") ? "moved to the obsolete folder" : "removed", left ? " [RED] some could not be removed: the stamp is kept for the next start" : "");
+    if (!left && ([fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil], ![want writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]))
+        MLOG("[RED] pipeline archive: the stamp %s could not be written", path.UTF8String);
+    return n;
+}
 static int arch_admit(ArchPlan *plan, NSString *device) {
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     if (plan->bundle) [paths addObject:plan->bundle];
@@ -10167,6 +10197,7 @@ static void pso4_init(void) {
         if (!pso4_on() || ![(id)g_dev respondsToSelector:@selector(newCompilerWithDescriptor:error:)]) return;   // no Metal 4 compiler (t_pso_pending's fake device): the MTLDevice path
         const char *e = getenv("DM_PSO_ARCHIVE"); NSString *user = pso_user_path();
         g_arch_dir = e && !strcmp(e, "off") ? nil : e && *e ? @(e) : user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"] : nil;
+        if (g_arch_dir && !g_pre_out) arch_stamp_check(g_arch_dir);   // an archive another system build, GPU or archive version wrote is built again (arch_stamp); not the bundle form's work folder
         ArchPlan *plan = arch_plan(g_arch_dir);
         if (!arch_admit(plan, g_arch_dir)) { g_arch_dir = nil; return; }   // no compiler also selects the normal render / compute fallback and disables hybrids and prebuild
         NSMutableArray<id<MTL4Archive>> *arch = [NSMutableArray array], *archp = [NSMutableArray array];

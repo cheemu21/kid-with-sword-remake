@@ -776,6 +776,27 @@ int main(int argc, char **argv) { @autoreleasepool {
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);
     mtl_init(); g_q = [g_dev newCommandQueue]; NSError *err = nil;
+    if (argc == 1) {   // the archive's stamp (arch_stamp_check): a folder with no stamp, or another system build's, is retired whole and stamped; the same stamp keeps its files
+        char sd[] = "/tmp/t_pso_stamp.XXXXXX"; if (!mkdtemp(sd)) abort();
+        NSString *s = @(sd), *stamp = [s stringByAppendingPathComponent:@"archive.stamp"]; NSFileManager *fm = NSFileManager.defaultManager;
+        void (^put)(NSString *) = ^(NSString *n) { [@"x" writeToFile:[s stringByAppendingPathComponent:n] atomically:NO encoding:NSUTF8StringEncoding error:nil]; };
+        BOOL (^has)(NSString *) = ^BOOL(NSString *n) { return [fm fileExistsAtPath:[s stringByAppendingPathComponent:n]]; };
+        put(@"00000-3.mtl4a"); put(@"00000-3.keys"); put(@"p00001.mtl4a"); put(@"pso_user.tsv");
+        EXPECT("stamp: an archive with none is retired (its two files)", 2, arch_stamp_check(s));
+        EXPECT("stamp: its files and index are gone", 0, (int)(has(@"00000-3.mtl4a") + has(@"00000-3.keys") + has(@"p00001.mtl4a")));
+        EXPECT("stamp: what is not an archive file stays", 1, (int)has(@"pso_user.tsv"));
+        EXPECT("stamp: written", 1, [[NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil] isEqualToString:arch_stamp()]);
+        put(@"00001-2.mtl4a"); put(@"00001-2.keys");
+        EXPECT("stamp: the same stamp keeps the archive", 0, arch_stamp_check(s));
+        EXPECT("stamp: its files stay", 2, (int)(has(@"00001-2.mtl4a") + has(@"00001-2.keys")));
+        [@"os\tOLDBUILD\ngpu\tother\narchive\t1\n" writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("stamp: another system build's archive is retired", 1, arch_stamp_check(s));
+        EXPECT("stamp: and stamped again", 1, [[NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil] isEqualToString:arch_stamp()]);
+        [fm removeItemAtPath:s error:nil];
+        EXPECT("stamp: a folder that does not exist yet is made and stamped, nothing retired", 0, arch_stamp_check(s));
+        EXPECT("stamp: there", 1, (int)[fm fileExistsAtPath:stamp]);
+        [fm removeItemAtPath:s error:nil];
+    }
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nstruct I { float4 a [[attribute(0)]]; };\n"
         "vertex V vs(I in [[stage_in]], uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, in.a.w); return o; }\n"
         "struct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\nfragment O fs() { return { float4(0.5, 0.25, 1.0, 0.5), float4(0.2, 0.4, 0.6, 0.8) }; }\n"
