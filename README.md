@@ -32,7 +32,9 @@
 > [!NOTE]
 > **Not an emulator.** The game's own code runs directly on the Apple chip, with its graphics rebuilt on Metal. Nothing from the game is in this repository or in any release: you build the app yourself from your own copy of the game. Not affiliated with Nintendo.
 
-## Latest: L7.5
+## Latest: L7.6
+
+**Mods.** The launcher now has a **Mods** button under Play, beside All Settings. Import a mod as a **.zip** or a folder from the Files app; each mod has its own switch, you can drag them into order, and the app makes room for bigger files in the game's size table. Usual Switch romfs mods work, amiibo keep working, and with no mod on the game starts exactly as before. Tested with a Goku character mod on an iPhone 18 Pro. How to use it: [Mods](docs/playing.md#mods).
 
 L7 moves the port onto the newest nxnative engine and aims at one thing: **stable, steady play on more iPhones, with the app staying under 5 GB of memory.** Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for older builds.
 
@@ -55,6 +57,7 @@ L7 moves the port onto the newest nxnative engine and aims at one thing: **stabl
 | 📱 **Wide view** | Fills the iPhone's screen at its own shape, nothing stretched |
 | 🎵 **Ocarina with your microphone** | Hum or whistle the notes into your iPhone's or Mac's microphone to play the ocarina |
 | 🛡️ **Amiibo** | From a list, a real figure over NFC, or Shortcuts |
+| 🧩 **Mods** | Import romfs mods as a .zip or folder, switch them on and off, set their order |
 | 🧠 **Texture Memory Saver** | Keeps the app under 5 GB, on by default on iPhone |
 | 🥔 **Ultra Potato Mode** | Render Scale down to 0.25 for older phones |
 | 💻 **Mac app** | The same launcher, made for the Mac |
@@ -70,6 +73,7 @@ In detail:
 - **A Mac app** with the same launcher, for Apple silicon Macs.
 - **Play the ocarina with your microphone,** on iPhone and Mac. Hum or whistle the notes and the game hears them, like playing the ocarina for real. Turn on **Ocarina Mic** on the launcher's main screen (off by default); the system asks for the microphone once.
 - **Amiibo**: pick one from an in-game list, scan a real figure with the iPhone's NFC reader, or tap one through Shortcuts in LiveContainer.
+- **Mods** (iPhone): the launcher's Mods button imports a .zip or a folder, finds its `romfs` folder wherever it is, and lists each mod with a switch, an order (the higher one wins a shared file) and swipe to delete. Mods load at Play. 7z and RAR files need unpacking first. See [Mods](docs/playing.md#mods).
 - **Touch controls**, and any controller iOS supports.
 - **No long freezes when a new shader appears**: a new pipeline gets at most 50 ms of a frame, and is built in the background after that.
 - **Steady after area changes**: unused render targets are freed a few at a time, and texture uploads go in batches of at most 48 MB, so memory stays under 5 GB without spikes.
@@ -181,6 +185,7 @@ Start with a cool phone: when iOS reports the phone as hot, it halves the CPU's 
 - The first area after starting can freeze for up to half a second while its textures load.
 - Area loads can take a frame of 300–700 ms.
 - If the picture ever stops for 5 seconds, a watchdog writes the game's threads to `log.txt`: send that log.
+- **Mods:** on one iPhone a modded character's body stayed invisible while the phone's pipeline cache was from an older build; it showed once that cache was rebuilt. If part of a modded model is invisible, delete the `pso_archive` folder in the game's Documents folder and start twice (the first start rebuilds it, a few minutes on the preparing screen). The cause is not known yet: send `log.txt` if it happens.
 
 ## Credits
 
