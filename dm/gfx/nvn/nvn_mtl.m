@@ -1658,6 +1658,33 @@ static void treg_sparse_notes(void);
 static void pass_split_try(void);
 static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
 static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
+// kid-with-sword-remake L7.8: pools for the raw memory table made resident a few at a time, ahead of the table (DM_NVN_RES_TRICKLE_MB, default 16; 0 = off). Once a game has used raw
+// global memory (gmem_map built), every pool something gave an address in goes into the residency set when the table is next built: on an iPhone 18 Pro's first area load (L7.7 log)
+// 2,453 pools, 1,176 MB, in one commit of the frame that first drew the area, which stopped 784 ms (838 ms of commits in 300 frames). The game addresses them while it loads, frames
+// before that draw, so each submission here puts up to this many MB of them into the set (committed with the submission), largest first only in the sense of the pool order; the table
+// then finds them resident and adds what is left. A pool made resident early stays as gmem_map would leave it (the set holds addressed pools for good), so memory ends where it did, only
+// sooner; no lookup changes. Pools over 64 MB and large pools' chunks are left to the table, which gives a large pool one buffer of its own
+static int g_gmem_seen;   // set by gmem_map once a raw global memory table was built
+static _Atomic uint64_t g_trickle_n, g_trickle_bytes;
+static void res_trickle(void) {
+    static int mb = -1; static uint64_t frame = UINT64_MAX, used, gen_done;
+    if (mb < 0) { const char *e = getenv("DM_NVN_RES_TRICKLE_MB"); mb = e ? atoi(e) : 16; if (mb < 0) mb = 0; if (mb > 512) mb = 512; MLOG("DM_NVN_RES_TRICKLE_MB=%d: addressed pools %s", mb, mb ? "go into the residency set a few at a time ahead of the raw memory table" : "wait for the raw memory table"); }
+    if (!mb || !g_gmem_seen) return;
+    uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); if (f != frame) { frame = f; used = 0; }
+    uint64_t budget = (uint64_t)mb << 20, gen = atomic_load(&g_pool_gen);
+    if (gen == gen_done || used >= budget) return;
+    int done = 1;
+    pthread_mutex_lock(&g_mu);
+    for (int k = 0; k < g_npool; k++) {
+        pool_ent *p = &g_pools[k];
+        if (p->res || !p->buf || p->buf.length > (64u << 20) || big_of(p->lo) >= 0 || !addr_meets(p->lo, p->hi)) continue;   // a large pool's chunks: the table gives it one whole-pool buffer
+        if (used + p->buf.length > budget && used) { done = 0; break; }
+        res_add(p->buf); p->res = 1; g_pool_res_n++; used += p->buf.length;
+        atomic_fetch_add_explicit(&g_trickle_n, 1, memory_order_relaxed); atomic_fetch_add_explicit(&g_trickle_bytes, p->buf.length, memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (done) gen_done = gen;
+}
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
     treg_sparse_notes();   // the mappings made before this submission
@@ -1665,6 +1692,7 @@ void mtl_sub_begin(void) {
     sub_cut_begin();
     defer_drain();
     rh_trim();
+    res_trickle();   // addressed pools ahead of the raw memory table (L7.8)
     tu_tick();   // the render targets drawn over since their last use go, once a second
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
     warm_claim();
@@ -5363,6 +5391,7 @@ void mtl_preread(const void *mem, uint64_t size) {
     });
 }
 static void preread_report(unsigned long long frame) {
+    if (atomic_load(&g_trickle_n)) MLOG("[trickle] up to frame %llu: %llu pools, %.0f MB put into the residency set ahead of the raw memory table", frame, (unsigned long long)atomic_load(&g_trickle_n), atomic_load(&g_trickle_bytes) / 1048576.0);
     if (g_preread <= 0) return;
     MLOG("[preread] up to frame %llu: %llu ranges, %.0f MB asked to be read ahead, %.1f ms in the calls, %llu failed (range gone), %llu skipped (asked within 2 s)", frame, (unsigned long long)atomic_load(&g_preread_n),
          atomic_load(&g_preread_bytes) / 1048576.0, atomic_load(&g_preread_ns) / 1e6, (unsigned long long)atomic_load(&g_preread_fail), (unsigned long long)atomic_load(&g_preread_skip));
@@ -12763,6 +12792,7 @@ static id<MTLBuffer> gmem_map(void) {
     uint64_t gen = atomic_load(&g_pool_gen);
     if (g_gmem_buf && g_gmem_gen == gen) return g_gmem_buf;
     id<MTLBuffer> b = [g_dev newBufferWithLength:DMSH_GMEM_MAP_ENTRIES * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
+    g_gmem_seen = 1;   // res_trickle may start
     uint8_t *t = (uint8_t *)b.contents; memset(t, 0, b.length);
     for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
     int n = 1, over = 0; uint64_t end = 0;
