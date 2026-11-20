@@ -821,6 +821,11 @@ check_t_render_enable_queue: t_render_enable_queue
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 
+t_vis_provisional: t_vis_provisional.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vis_provisional.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_vis_provisional
+check_t_vis_provisional: t_vis_provisional
+	./t_vis_provisional
 t_vis_need: t_vis_need.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vis_need.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_vis_need

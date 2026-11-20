@@ -1286,6 +1286,7 @@ NVN(nvnCommandBufferResetCounter, void, NVNcommandBuffer *c, NVNcounterType t) {
 }
 NVN(nvnCommandBufferReportCounter, void, NVNcommandBuffer *c, NVNcounterType t, NVNbufferAddress a) {
     uint8_t *p = cmd_alloc(CB(c), 24); put_hdr(p, OP_REPORT_COUNTER, 24); uint64_t tt = t; memcpy(p + 8, &tt, 8); memcpy(p + 16, &a, 8);
+    if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) mtl_vis_report_recorded((uint64_t)a);   // on the game's thread, before it can read the record (DM_NVN_VIS_PROVISIONAL)
 }
 NVN(nvnCommandBufferCopyBufferToBuffer, void, NVNcommandBuffer *c, NVNbufferAddress src, NVNbufferAddress dst, size_t n, int flags) {
     (void)flags;
