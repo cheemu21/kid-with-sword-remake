@@ -15622,7 +15622,18 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         for (const char *q = e; q && *q && ndko < 8; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(dko[ndko], q, n); dko[ndko++][n] = 0; } }
     if (ndko) { int ovr = 0; for (int i = 0; i < ndko && pr->sh[1]; i++) ovr |= !strncmp(pr->sh[1]->key, dko[i], strlen(dko[i]));
         unsigned df0 = (unsigned)S.ds.df; if (ovr) S.ds.df = 8; cur_ds = dss_get(g_pass.hd, g_pass.hs); S.ds.df = df0; cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
-    else if (g_dss_dirty || cur_ds_pass != g_pass.serial) { cur_ds = dss_get(g_pass.hd, g_pass.hs); cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
+    // kid-with-sword-remake L7.9 test, DM_NVN_DEPTH_EQ_BIAS=<units> (off by default): a draw that tests depth EQUAL without writing it passes "equal or that many steps nearer" instead,
+    // as LEQUAL (GEQUAL for a reversed depth range, told by the last draw that wrote depth) with a constant bias of that many units toward the viewer. A game draws a piece's depth in a
+    // pre-pass, then its colour where the depth is EQUAL: NVIDIA's GPU gives the two passes the same depth, Apple's may not. A Goku mod's body (Ocarina of Time, Link's piece #23:
+    // pre-pass e3d81ddfed3e0ec8, colour 6b0608a302dc88bd / 47e804143a060733) failed every sample on an iPhone 18 Pro on some starts and showed on others; the base game's Link showed
+    static int eqb = -1, zdir, eq_last; static uint64_t eq_draws;
+    if (eqb < 0) { const char *e = getenv("DM_NVN_DEPTH_EQ_BIAS"); eqb = e ? atoi(e) : 0; if (eqb < 0) eqb = 0; if (eqb > 1024) eqb = 1024; if (eqb) MLOG("DM_NVN_DEPTH_EQ_BIAS=%d: depth EQUAL draws that write no depth pass up to %d steps nearer", eqb, eqb); }
+    if (S.ds.dt && S.ds.dw) { unsigned f = (unsigned)S.ds.df - 1; if (f == MTLCompareFunctionLess || f == MTLCompareFunctionLessEqual) zdir = 1; else if (f == MTLCompareFunctionGreater || f == MTLCompareFunctionGreaterEqual) zdir = -1; }
+    int eq_relax = eqb && zdir && g_pass.hd && S.ds.dt && !S.ds.dw && (unsigned)S.ds.df - 1 == MTLCompareFunctionEqual;
+    if (eq_relax && !eq_draws++) MLOG("depth EQUAL relaxed (DM_NVN_DEPTH_EQ_BIAS): first draw vertex %s fragment %s, depth range %s", pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-", zdir > 0 ? "near to far" : "reversed");
+    if (!ndko && (g_dss_dirty || cur_ds_pass != g_pass.serial || eq_relax != eq_last)) {
+        unsigned df0 = (unsigned)S.ds.df; if (eq_relax) S.ds.df = (zdir > 0 ? MTLCompareFunctionLessEqual : MTLCompareFunctionGreaterEqual) + 1;
+        cur_ds = dss_get(g_pass.hd, g_pass.hs); S.ds.df = df0; cur_ds_pass = g_pass.serial; g_dss_dirty = 0; eq_last = eq_relax; }
     if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; }
     // Each face has its own reference value (SetStencilRef takes a face), as it has its own compare function, operations and masks in dss_get
     // (docs/reference/rendering.md, "Front and back stencil reference values")
@@ -15662,6 +15673,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
       if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
+      if (eq_relax) bi[0] += zdir > 0 ? -(float)eqb : (float)eqb;   // toward the viewer (DM_NVN_DEPTH_EQ_BIAS)
       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
       if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
