@@ -610,6 +610,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     if (s->pool) vpool_taken(s->pool);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
     o->serial = nvn_new_serial(); mtl_tex_init(o);
+    if (o->mem && !s->pkg_data && !(s->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | 0x200))) mtl_preread(o->mem, o->L.size);   // its data back from the guest files ahead of the GPU's first use (DM_NVN_PREREAD)
     {   // DM_NVN_TEXINFO=WxH also logs every texture of that size as it is initialized (render targets included): which ones share storage, and how their descriptions differ
         static int ti = -1; static uint32_t tw, th;
         if (ti < 0) { const char *e = getenv("DM_NVN_TEXINFO"); ti = e && sscanf(e, "%ux%u", &tw, &th) == 2; }
@@ -2895,6 +2896,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
     if ((uint64_t)bb->off + bb->size > bb->pool->size) ONCE_LOG("BufferInitialize: a buffer reaches past the end of its pool (offset %#llx size %#llx pool %#llx); only an access that leaves the pool is an error, and it is reported where it happens", (unsigned long long)bb->off, (unsigned long long)bb->size, (unsigned long long)bb->pool->size);
     *(buf_t *)buf = (buf_t){.magic = MAGIC('B', 'U', 'F', 0), .pool = bb->pool, .off = bb->off, .size = bb->size};
     pool_mark_addressed(bb->pool);
+    if (!(bb->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | 0x200)) && (uint64_t)bb->off < bb->pool->size) { uint64_t n = bb->size; if (n > bb->pool->size - (uint64_t)bb->off) n = bb->pool->size - (uint64_t)bb->off; mtl_preread(bb->pool->mem + bb->off, n); }   // DM_NVN_PREREAD
     OLOG("BufferInitialize %p pool=%p off=%#llx size=%#llx", (void *)buf, (const void *)bb->pool, (unsigned long long)bb->off, (unsigned long long)bb->size);
     return 1;
 }
