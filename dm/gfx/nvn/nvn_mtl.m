@@ -5331,20 +5331,30 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
 // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
-// kid-with-sword-remake L7.7 test (DM_NVN_PREREAD=1, off by default): read a resource's guest memory back in the background as soon as the game sets it up. With the guest in files
+// kid-with-sword-remake L7.7 (DM_NVN_PREREAD): read a resource's guest memory back in the background as soon as the game sets it up. With the guest in files
 // (DM_GUEST_FILE) iOS writes what a load put into memory out to the files and may drop it from RAM; the GPU then needs it resident, and making it resident read it back from storage on the
 // submit thread in one go: an iPhone 18 Pro's first area load (L7.6 log) stopped 2.8 s in one frame that read 882 MB, then 0.9 and 0.8 s. Here each buffer and texture (hle_nvn.c
 // nvnBufferInitialize, nvnTextureInitialize: in a pool the CPU can reach, so with the game's data in it) asks the kernel to read its range ahead (madvise MADV_WILLNEED) on a utility
 // queue, while the load runs on. Advice only: nothing reads or writes the memory here, a range freed meanwhile only makes the call fail, and the GPU's view is unchanged. Ranges past
 // PREREAD_MAX are left out (a large pool read whole would crowd out what a load needs). The census line every 600 frames says how much was asked and how long the calls took
 enum { PREREAD_MAX = 64u << 20 };
-static int g_preread = -1; static _Atomic uint64_t g_preread_n, g_preread_bytes, g_preread_ns, g_preread_fail;
-static int preread_on(void) { if (g_preread < 0) { const char *e = getenv("DM_NVN_PREREAD"); g_preread = e && atoi(e) > 0; if (g_preread) MLOG("DM_NVN_PREREAD=1: buffers and textures are read ahead in the background when the game sets them up"); } return g_preread; }
+// Default on since L7.7 (the A/B on an iPhone 18 Pro, same save and world change: stalls over 100 ms 18 → 8, over 300 ms 9 → 1, the worst 1.18 s → 0.50 s, 7.0 → 1.9 s stalled
+// in all); DM_NVN_PREREAD=0 turns it off. The game makes small buffers again every frame over the same memory (3.5 million calls for 60 GB in 2.5 minutes in that test), so a range
+// asked within PREREAD_AGAIN_NS is not asked again: a slot per range start (PREREAD_SLOTS, by address) keeps its end and when; races between threads only ask once more or once less,
+// which advice allows. Pools are read ahead when made too (hle_nvn.c nvnMemoryPoolInitialize): the 0.5 s stall left read 459 MB that no buffer or texture had named
+enum { PREREAD_SLOTS = 4096 }; static const uint64_t PREREAD_AGAIN_NS = 2000000000ull;
+static struct { _Atomic uintptr_t a, b; _Atomic uint64_t t; } g_preread_seen[PREREAD_SLOTS];
+static int g_preread = -1; static _Atomic uint64_t g_preread_n, g_preread_bytes, g_preread_ns, g_preread_fail, g_preread_skip;
+static int preread_on(void) { if (g_preread < 0) { const char *e = getenv("DM_NVN_PREREAD"); g_preread = !e || atoi(e) > 0; MLOG("DM_NVN_PREREAD=%d: pools, buffers and textures are %sread ahead in the background when the game sets them up", g_preread, g_preread ? "" : "not "); } return g_preread; }
 void mtl_preread(const void *mem, uint64_t size) {
     if (!mem || !size || size > PREREAD_MAX || !preread_on()) return;
     static dispatch_queue_t q; static dispatch_once_t once;
     dispatch_once(&once, ^{ q = dispatch_queue_create("dm.preread", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
     uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)mem & ~(pg - 1), b = ((uintptr_t)mem + size + pg - 1) & ~(pg - 1);
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); unsigned k = (unsigned)((a >> 12) * 0x9E3779B1u) % PREREAD_SLOTS;
+    if (atomic_load_explicit(&g_preread_seen[k].a, memory_order_relaxed) == a && atomic_load_explicit(&g_preread_seen[k].b, memory_order_relaxed) >= b &&
+        now - atomic_load_explicit(&g_preread_seen[k].t, memory_order_relaxed) < PREREAD_AGAIN_NS) { atomic_fetch_add_explicit(&g_preread_skip, 1, memory_order_relaxed); return; }
+    atomic_store_explicit(&g_preread_seen[k].a, a, memory_order_relaxed); atomic_store_explicit(&g_preread_seen[k].b, b, memory_order_relaxed); atomic_store_explicit(&g_preread_seen[k].t, now, memory_order_relaxed);
     atomic_fetch_add(&g_preread_n, 1); atomic_fetch_add(&g_preread_bytes, b - a);
     dispatch_async(q, ^{
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -5354,8 +5364,8 @@ void mtl_preread(const void *mem, uint64_t size) {
 }
 static void preread_report(unsigned long long frame) {
     if (g_preread <= 0) return;
-    MLOG("[preread] up to frame %llu: %llu ranges, %.0f MB asked to be read ahead, %.1f ms in the calls, %llu failed (range gone)", frame, (unsigned long long)atomic_load(&g_preread_n),
-         atomic_load(&g_preread_bytes) / 1048576.0, atomic_load(&g_preread_ns) / 1e6, (unsigned long long)atomic_load(&g_preread_fail));
+    MLOG("[preread] up to frame %llu: %llu ranges, %.0f MB asked to be read ahead, %.1f ms in the calls, %llu failed (range gone), %llu skipped (asked within 2 s)", frame, (unsigned long long)atomic_load(&g_preread_n),
+         atomic_load(&g_preread_bytes) / 1048576.0, atomic_load(&g_preread_ns) / 1e6, (unsigned long long)atomic_load(&g_preread_fail), (unsigned long long)atomic_load(&g_preread_skip));
 }
 // The pools in the residency set and why (L7.2.1, diagnostic, every 600 frames): a pool's zero-copy buffer in the set wires every page of it, and on an iPhone that is charged to the app's
 // footprint (the graphics ledger: 2.4-3.9 GB of Ocarina of Time's 3.4-5.2 GB on an iPhone 18 Pro). n_tex_reads / n_other: the first lookups of each pool by texture uploads and by
