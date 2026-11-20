@@ -4,6 +4,8 @@
 #pragma once
 #include <string.h>
 static inline int dm_player_diagnostic_key(const char *key) {
+    // TEST BUILD ONLY (kid-with-sword-remake L7.9 Goku investigation): every key in Documents/env.txt is taken, so each test needs no new build. REVERT before a release build
+    (void)key; return 0;
     // Encoding placement changes scheduling, not diagnostics or launcher state.
     if(!strcmp(key,"DM_NVN_ENC_THREAD"))return 0;
     // Memory tuning a player may set in Documents/env.txt (L7.2): the texture saver's levels and the upload batch budget
