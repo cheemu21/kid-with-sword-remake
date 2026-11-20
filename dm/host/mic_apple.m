@@ -1,5 +1,7 @@
-// The device's microphone for nn::audio's input streams (mic_apple.h): AVAudioEngine's input node, converted to 48 kHz mono PCM16 into a ring that hle_audio.c's streams read
+// The device's microphone for nn::audio's input streams (mic_apple.h): AVAudioEngine's input node, converted to 48 kHz mono, levelled (mic_level.h: quiet humming and whistling raised to
+// the level a game's voice detection waits for; DM_MIC_BOOST, the launcher's Mic Sensitivity) and written as PCM16 into a ring that hle_audio.c's streams read
 #import "mic_apple.h"
+#include "mic_level.h"
 #import <AVFAudio/AVFAudio.h>
 #import <Foundation/Foundation.h>
 #include <pthread.h>
@@ -15,6 +17,7 @@ static int g_users;               // started streams
 static AVAudioEngine *g_engine;
 static AVAudioConverter *g_conv;
 static AVAudioFormat *g_out;      // 48 kHz mono float32: the converter's output, written into the ring as PCM16
+static mic_level g_level;         // the tap's thread alone, once the capture has started
 
 int dm_mic_wanted(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_MIC"); v = e && atoi(e) != 0; } return v; }
 
@@ -36,7 +39,15 @@ void dm_mic_prepare(void) {
     }
 }
 
-static void mic_write(const float *s, uint32_t n) {   // the tap's thread
+// What the leveler did, every 10 s of capture in which it boosted something: the evidence for tuning it on a device (Documents/log.txt)
+static void mic_level_log(void) {
+    if (g_level.blocks < 2000) return;
+    uint32_t blocks, boosted; float loudest, floor_db; mic_level_take_stats(&g_level, &blocks, &boosted, &loudest, &floor_db);
+    if (boosted) LOG("microphone: background %.0f dBFS, loudest %.0f dBFS, boosted %.1f s of the last %.0f s", floor_db, loudest, boosted * (double)MIC_LEVEL_BLOCK / DM_MIC_RATE, blocks * (double)MIC_LEVEL_BLOCK / DM_MIC_RATE);
+}
+
+static void mic_write(float *s, uint32_t n) {   // the tap's thread
+    mic_level_run(&g_level, s, (int)n); mic_level_log();
     uint64_t h = atomic_load_explicit(&g_head, memory_order_relaxed);
     for (uint32_t i = 0; i < n; i++) { float v = s[i] * 32767.0f; g_ring[(h + i) & (DM_MIC_RING - 1)] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v); }
     atomic_store_explicit(&g_head, h + n, memory_order_release);
@@ -51,6 +62,9 @@ static int mic_start(void) {   // g_mu held
     g_conv = [[AVAudioConverter alloc] initFromFormat:hw toFormat:g_out];
     if (!g_conv) { LOG("[RED] microphone: no converter from %.0f Hz x%u to 48 kHz mono", hw.sampleRate, (unsigned)hw.channelCount); return 0; }
     AVAudioConverter *conv = g_conv; AVAudioFormat *out = g_out;
+    float boost, margin; const char *v = getenv("DM_MIC_BOOST"), *preset = mic_level_preset(v, &boost, &margin);
+    if (!preset) { LOG("[RED] DM_MIC_BOOST=%s: not off, normal or high; normal", v); preset = "normal"; }
+    mic_level_init(&g_level, boost, margin);   // a background learnt anew at each start
     [in installTapOnBus:0 bufferSize:1024 format:hw block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
         (void)when;
         AVAudioFrameCount cap = (AVAudioFrameCount)((double)buf.frameLength * DM_MIC_RATE / hw.sampleRate) + 16;
@@ -66,7 +80,7 @@ static int mic_start(void) {   // g_mu held
     [e prepare];
     if (![e startAndReturnError:&err]) { [in removeTapOnBus:0]; LOG("[RED] microphone: the capture did not start: %s", err.localizedDescription.UTF8String); return 0; }
     g_engine = e;
-    LOG("microphone: capturing (%.0f Hz x%u into 48 kHz mono PCM16)", hw.sampleRate, (unsigned)hw.channelCount);
+    LOG("microphone: capturing (%.0f Hz x%u into 48 kHz mono PCM16), sensitivity %s (up to +%.0f dB, %.0f dB over the background)", hw.sampleRate, (unsigned)hw.channelCount, preset, boost, margin);
     return 1;
 }
 

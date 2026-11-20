@@ -117,6 +117,25 @@ From the same Kakariko save, walk into Hyrule Field and continue towards Castle 
 
 The game autosaves into `slot_00` and `slot_01`, with `option.sav` and `account.sav`. The Load screen lists them and reloading works. A save's thumbnail is a 543x306 JPEG in `caption.sav`, made from a copy of a texture to a buffer. A manual save (Menu, System, Save) on the current build has the picture (slot 02, mean colour 138 / 123 / 86). The autosaves in the work folder's saves, made on older chains, hold a black one. Open: an autosave made on the current build has not been looked at.
 
+## Ocarina by voice
+
+The launcher's **Ocarina Mic** (`DM_MIC`) lists the device's microphone to the game ([`hle_audio.c`](../../host/hle_audio.c), [`mic_apple.m`](../../host/mic_apple.m)). The game opens two input streams on it, `MainMicrophone` and the SDK's true raw device (`TrueRawAudioIn`), each PCM16 mono 48 kHz (`main+0xf48124`), and reads one of them 256 frames at a time (`main+0x336d510`); its open's second argument (`main+0xf480c0`) picks which, and is 0 at the first open. Its detector, read in v131072:
+
+- The level is the RMS of each 512-frame block in dBFS, clamped to -76..0 (`main+0x336f090`).
+- On the main microphone a note starts when a block reaches a fixed **-32 dBFS** and ends under -52 (`main+0x336e000`). On the raw device the threshold is 3-20 dB over a background the game learns in its first 46 blocks and then follows.
+- Then come its own 4 kHz / 8 kHz filters and the pitch analysis (`main+0x336e000` onward; not read further).
+
+- Resolved in the host (2026-11-20, not yet tried on a phone): quiet humming and whistling at a normal distance were not taken as notes. The iPhone's and the Mac's built-in microphones, passed at unity gain, put them well under -32 dBFS. The capture now runs a voice leveler before the ring ([`mic_level.h`](../../host/mic_level.h), both streams, any game). It learns the background as the quietest 5 ms block of the last 2 s. A block that stands a margin over it, two blocks running, is raised toward -20 dBFS by at most a boost. The background, a sound within the margin and a loud one pass untouched. **Mic Sensitivity** (`DM_MIC_BOOST`, shown while Ocarina Mic is on) sets it:
+
+  | Mic Sensitivity | Boost at most | Margin over the background | Quietest note the -32 gate then takes |
+  |---|---|---|---|
+  | Off (before this change) | 0 dB | - | -32 dBFS |
+  | Normal (default) | +24 dB | 12 dB | -56 dBFS |
+  | High | +36 dB | 8 dB | -68 dBFS |
+
+  `t_mic_level` checks it against a model of the game's gate. A -45 dBFS hum over a -62 dBFS room is missed without the leveler; with it, it reaches -20 dBFS from 20 ms on, and the room stays under -52. A -60 dBFS hum reaches the gate on High only, and a background that stays is no longer raised after 2 s. Each 10 s of capture in which it raised something logs `microphone: background … dBFS, loudest … dBFS, boosted … s`. A phone log with those lines is the data for retuning the presets.
+- Open: the game's own sound from the speaker counts as signal when it stands over the background, so on Normal and High it is raised like a voice. The Switch 2's microphones cancel their own speaker's sound; the host's capture (AVAudioEngine) does not, as the game's sound plays through a separate output unit. If notes trigger by themselves, Off is the setting as before. Also open: which stream the ocarina reads in play (the reopen's argument, `main+0x336bc60`), and how loud the Switch 2's microphones deliver a voice.
+
 ## Driving it on the Mac
 
 Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <log>` (with a guard that kills the host past 12.5 GB wired or 16 GB of swap; do not run without it), `ctl.sh`, `seq.sh`, `snap.sh`, `keys.sh <logs>` (adds and builds the keys the logs ask for), `white.py` (share of near-white pixels in a shot) and `run/save_ref` (autosaves in Kokiri Forest).
