@@ -9016,8 +9016,22 @@ static id<MTLFunction> typed_fn(NvShader *fs, uint32_t cls, int at, int lo, uint
 // reference are data, not part of the pipeline: one pipeline serves every function, and a draw that changes the reference every frame (a dissolve) keeps it. As in OpenGL,
 // there is no test when colour 0 goes to an integer target
 static inline int atest_on(void) { return S.color.alpha_func && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS; }
+// DM_NVN_ATEST_OFF=<fragment shader key prefix>,... (diagnostic, kid-with-sword-remake L7.9 test): those draws go without the alpha test, and the function and reference they asked for
+// are logged (the first 8 times per key): a Goku mod's body (Ocarina of Time, fragment 47e804143a060733) drew nothing on some starts while a solid-colour fragment in its place drew
+static int atest_off(NvShader *fs) {
+    static char keys[6][24]; static int nk = -1; static int said[6];
+    if (nk < 0) { nk = 0; const char *e = getenv("DM_NVN_ATEST_OFF");
+        for (const char *q = e; q && *q && nk < 6; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(keys[nk], q, n); keys[nk++][n] = 0; }
+        if (nk) MLOG("DM_NVN_ATEST_OFF: %d fragment shader key(s) drawn without the alpha test", nk); }
+    for (int i = 0; i < nk && fs; i++) if (!strncmp(fs->key, keys[i], strlen(keys[i]))) {
+        if (said[i]++ < 8) { float r; memcpy(&r, &S.alpha_ref, 4); MLOG("DM_NVN_ATEST_OFF: %s asked for alpha function %u reference %g (has an alpha entry %d); drawn without the test", fs->key, S.color.alpha_func, r, fs->has_alpha); }
+        return 1; }
+    return 0;
+}
 static uint32_t atest_key(NvShader *fs, const uint32_t cfmt[8], const uint8_t *lmap) {   // pso_key.atest; lmap: a merged pass's physical → logical targets
-    if (!fs || !atest_on()) return 0;
+    if (!fs) return 0;
+    int off = atest_off(fs);   // logs what the draw asked for even when it has no test
+    if (!atest_on() || off) return 0;
     // Comparisons consume SPH output-0 alpha (word 18 bit 3), not an MSL float4's padding. As in Ryujinx EmitterContext.PrepareForReturn, NEVER is unconditional.
     if (S.color.alpha_func != NVN_ALPHA_FUNC_NEVER && fs->rf.omap_known && !(fs->rf.omap & 8)) return 0;
     for (int i = 0; i < 8; i++) if (cfmt[i] && (lmap ? lmap[i] : i) == 0 && pf_int_kind((MTLPixelFormat)cfmt[i])) return 0;
