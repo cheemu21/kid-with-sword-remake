@@ -195,7 +195,6 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
-- [An archive from another build broke a depth-equal pass](../../../docs/reference/rendering.md#an-archive-from-another-build-broke-a-depth-equal-pass): fixed by stamping the pipeline archive (2026-11-20). A mod that draws only Link's tunic body (piece #23) showed nothing on an iPhone 18 Pro until the device archive written two days earlier was built again.
 - [Live BUFFER ordering and mapping](../../../docs/reference/rendering.md#sampled-buffer-reads-follow-source-writes-and-mappings): synthetic source-review proof for issue #2247. No Ocarina floor/glow artifact or performance improvement is attributed to this change.
 
 - [Private buffer texture fallback API guards](../../../docs/reference/rendering.md#private-buffer-texture-fallbacks-must-not-query-cpu-contents): synthetic source-review tests reproduce a validation abort when the existing unsupported-storage fallback queries private buffer contents. The guard preserves that fallback; GPU snapshot ordering and Ocarina artifact reachability remain open.

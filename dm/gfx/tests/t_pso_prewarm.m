@@ -110,10 +110,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         if (getenv("T_HARVEST_HOLD")) { useconds_t us = (useconds_t)atoi(getenv("T_HARVEST_HOLD")) * 1000; dispatch_async(arch_harvest_q(), ^{ usleep(us); }); }
         return mtl_pso_prebuild_tool() == 1 ? 0 : 1;
     }
-    if (argc >= 3 && !strcmp(argv[1], "--open")) {   // the device's archive stands for one this system wrote: stamped as a run stamps it (arch_stamp_check)
-        mtl_init(); const char *d = getenv("DM_PSO_ARCHIVE");
-        if (d && *d && strcmp(d, "off")) [arch_stamp() writeToFile:[@(d) stringByAppendingPathComponent:@"archive.stamp"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        shmap_load(); return open_run(@(argv[2])); }
+    if (argc >= 3 && !strcmp(argv[1], "--open")) { mtl_init(); shmap_load(); return open_run(@(argv[2])); }
     char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s/t_pso_prewarm.XXXXXX", getenv("TMPDIR") ?: "/tmp"); if (!mkdtemp(tmp)) abort();
     NSString *root = @(tmp), *msl = [root stringByAppendingFormat:@"/msl/b-%s", DMSH_CHAIN], *tables = [root stringByAppendingPathComponent:@"tables"];
     if (!fixtures(msl, tables)) { printf("t_pso_prewarm: no Metal compiler (xcrun metal), not run\n"); [NSFileManager.defaultManager removeItemAtPath:root error:nil]; return 0; }

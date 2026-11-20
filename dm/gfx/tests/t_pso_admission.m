@@ -87,7 +87,6 @@ int main(int argc, char **argv) { @autoreleasepool {
     [@"keep this stamp\n" writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
     setenv("DM_PSO_BUNDLE", bundle.UTF8String, 1); setenv("DM_PSO_ARCHIVE", device.UTF8String, 1); setenv("DM_PSO_MTL4", "1", 1);
     AdmissionDevice *dev = [AdmissionDevice new]; dev->pipeline = [NSObject new]; g_dev = (id)dev;
-    [arch_stamp() writeToFile:[device stringByAppendingPathComponent:@"archive.stamp"] atomically:YES encoding:NSUTF8StringEncoding error:nil];   // a device archive this system wrote (arch_stamp_check)
     pso4_init();
     EXPECT("archive set admitted together", admit ? 3 : 0, dev->opens);
     EXPECT("no compiler on rejection", admit ? 1 : 0, dev->compilers);
