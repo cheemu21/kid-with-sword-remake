@@ -1444,20 +1444,22 @@ static void rc_gpu_write(uint64_t dst, uint64_t n) {
 // Counting starts at the first reset or, for a game that never resets, at the first report: the GPU's counter runs from the queue's creation, so such a game reads end - begin of two reports around each query
 // (Red Dead Redemption's character occlusion queries: counting used to start only at a reset, so every report was 0 and the bodies of characters a few metres away were dropped).
 // (Previously always wrote 0: occlusion query = 'fully occluded', campfires / light sources got culled - the character select screen calls ResetCounter 21 times per frame)
-// kid-with-sword-remake L7.9: a samples-passed record the GPU has never written (count and timestamp both 0) gets a count of 1 when its report is encoded, so a game that reads it
-// before the submission completes reads "visible", not "occluded" (DM_NVN_VIS_PROVISIONAL, on by default; 0 = off). The host writes the count only at completion, and a submission can
+// kid-with-sword-remake L7.9: a samples-passed record whose count reads 0 when its report is encoded (never written, or a 0 left from an earlier answer in that slot) gets a count of 1,
+// so a game that reads it before the submission completes reads "visible", not "occluded" (DM_NVN_VIS_PROVISIONAL, on by default; 0 = off). A first version took only never-written
+// records (count and timestamp 0): the body still vanished on a later start, the slot holding an earlier 0. A non-zero count is left, so a game that uses the number itself (a glare's
+// strength) reads the last real one. The host writes the count only at completion, and a submission can
 // complete several frames after the game encoded it (more than half a second during an area load). Ocarina of Time wraps a Goku mod's body, one 20,598-index mesh, in a query: on some
 // starts the game stopped drawing it from the first frames on (no draw, so no query again: the body stayed invisible all session), while every other piece of Link drew. The completion
-// still writes the real count over it, so an occluded object is drawn for at most the frames until then. A record already written (count or timestamp set) is left as it is
+// still writes the real count over it, so an occluded object is drawn for at most the frames until then
 static uint64_t g_vis_prov;
 static void vis_provisional(uint64_t ad) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_VIS_PROVISIONAL"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_VIS_PROVISIONAL=0: a samples-passed record reads 0 until its submission completes"); }
     if (!on || !ad || (ad & 7)) return;
     uint64_t rec[2]; vm_size_t got = 0;
     if (vm_read_overwrite(mach_task_self(), (vm_address_t)ad, sizeof rec, (vm_address_t)rec, &got) || got != sizeof rec) return;   // not readable: leave it to the completion
-    if (rec[0] || rec[1]) return;
+    if (rec[0]) return;   // a count already there (this query's last answer, or a slot's earlier one) is left: only a 0 can cull
     uint64_t one = 1; memcpy((void *)ad, &one, sizeof one);
-    if (g_vis_prov++ < 4 || !(g_vis_prov & (g_vis_prov - 1))) MLOG("occlusion queries: record %#llx never written, reads 1 (visible) until its submission completes (%llu so far)", (unsigned long long)ad, (unsigned long long)g_vis_prov);
+    if (g_vis_prov++ < 4 || !(g_vis_prov & (g_vis_prov - 1))) MLOG("occlusion queries: record %#llx read 0 (%s), reads 1 (visible) until its submission completes (%llu so far)", (unsigned long long)ad, rec[1] ? "an earlier answer" : "never written", (unsigned long long)g_vis_prov);
 }
 typedef struct { void *buf; uint32_t slot; } vis_slot;
 typedef struct { int n; vis_slot s[]; } vis_list;
