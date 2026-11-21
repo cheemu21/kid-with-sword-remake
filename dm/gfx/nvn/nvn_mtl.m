@@ -1251,7 +1251,7 @@ static int g_rc_skip;   // logical queue state: a render-enable block evaluated 
 // still does. With DM_NVN_VISLOG the condition a draw of the logged size would have been dropped by is logged either way (g_rc_last: the last condition evaluated)
 static int rc_draw_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_RC_DRAW"); on = e && atoi(e) > 0; if (on) MLOG("DM_NVN_RC_DRAW=1: conditions on report records never drop draws (test)"); } return on; }
 static struct { int mode, known, would; uint64_t addr, x, y, mx[2], my[2]; int fx, fy; } g_rc_last = {.mode = -1};
-static _Atomic uint64_t g_vislog_skips, g_vislog_cond;
+static _Atomic uint64_t g_vislog_skips, g_vislog_cond, g_vislog_cond_unknown, g_vislog_seen, g_vislog_first, g_vislog_last;
 // Latest command-ordered writer of each report counter. Completed reports are read
 // from memory, so CPU rewrites remain visible. Unfinished queries stay unknown;
 // timestamp counters and explicit writes can supply known bytes before completion.
@@ -1488,13 +1488,24 @@ static void vis_report_done(uint64_t ad) {   // a report's answer written (post_
 static _Atomic uint64_t g_cur_frame;
 static void vislog_cond(int skipped, int indirect) {
     if (g_rc_last.mode < 0) return;
-    uint64_t n = atomic_fetch_add(&g_vislog_cond, 1) + 1; if (!g_rc_last.would) return;
+    uint64_t n = atomic_fetch_add(&g_vislog_cond, 1) + 1; if (!g_rc_last.known) atomic_fetch_add(&g_vislog_cond_unknown, 1); if (!g_rc_last.would) return;
     uint64_t k = atomic_fetch_add(&g_vislog_skips, 1) + 1;
     if (k <= 12 || !(k & (k - 1)))
         MLOG("[vislog] frame %llu: a %d-index draw%s %s by a condition (%s, records %#llx / +16: values %llu / %llu; memory %llu,%llu / %llu,%llu; flags %#x / %#x; %llu of %llu conditional draws of it)",
              (unsigned long long)atomic_load(&g_cur_frame), g_vislog, indirect ? " (indirect)" : "", skipped ? "dropped" : "kept (DM_NVN_RC_DRAW)", g_rc_last.mode ? "draw if not equal" : "draw if equal",
              (unsigned long long)g_rc_last.addr, (unsigned long long)g_rc_last.x, (unsigned long long)g_rc_last.y, (unsigned long long)g_rc_last.mx[0], (unsigned long long)g_rc_last.mx[1],
              (unsigned long long)g_rc_last.my[0], (unsigned long long)g_rc_last.my[1], g_rc_last.fx, g_rc_last.fy, (unsigned long long)k, (unsigned long long)n);
+}
+// DM_NVN_VISLOG: every 150 frames and when graphics suspend, what happened to draws of the logged size, in all and since the last line: issued by the game (replay, before any
+// condition drops one), encoded, under a condition (unknown at replay: drawn), dropped, and the query reports around it
+static void vislog_summary(unsigned long long frame, const char *why) {
+    static uint64_t p_seen, p_drawn, p_rep, p_zero, p_cond, p_skip; static unsigned long long p_frame;
+    uint64_t seen = atomic_load(&g_vislog_seen), drawn = atomic_load(&g_vislog_draws), rep = atomic_load(&g_vislog_reports), zero = atomic_load(&g_vislog_zero), cond = atomic_load(&g_vislog_cond), skip = atomic_load(&g_vislog_skips);
+    MLOG("[vislog] %s frame %llu: the %d-index mesh issued %llu times (%llu since frame %llu), encoded %llu (%llu), under a condition %llu (%llu; %llu unknown in all), dropped %llu (%llu); its queries reported %llu (%llu), 0 samples %llu (%llu); first issued at frame %llu, last at %llu",
+         why, frame, g_vislog, (unsigned long long)seen, (unsigned long long)(seen - p_seen), p_frame, (unsigned long long)drawn, (unsigned long long)(drawn - p_drawn), (unsigned long long)cond, (unsigned long long)(cond - p_cond),
+         (unsigned long long)atomic_load(&g_vislog_cond_unknown), (unsigned long long)skip, (unsigned long long)(skip - p_skip), (unsigned long long)rep, (unsigned long long)(rep - p_rep), (unsigned long long)zero, (unsigned long long)(zero - p_zero),
+         (unsigned long long)atomic_load(&g_vislog_first), (unsigned long long)atomic_load(&g_vislog_last));
+    p_seen = seen; p_drawn = drawn; p_rep = rep; p_zero = zero; p_cond = cond; p_skip = skip; p_frame = frame;
 }
 typedef struct { void *buf; uint32_t slot; } vis_slot;
 typedef struct { int n; vis_slot s[]; } vis_list;
@@ -2992,7 +3003,7 @@ void mtl_present_flush(void);
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
 static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+void mtl_drain(void) { if (g_vislog > 0) vislog_summary(atomic_load(&g_cur_frame), "suspend at"); present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -5445,7 +5456,6 @@ void mtl_preread(const void *mem, uint64_t size) {
     });
 }
 static void preread_report(unsigned long long frame) {
-    if (g_vislog > 0) MLOG("[vislog] up to frame %llu: the %d-index mesh drawn %llu times, its queries reported %llu times, %llu of them 0; %llu of its draws under a condition, %llu of those false", frame, g_vislog, (unsigned long long)atomic_load(&g_vislog_draws), (unsigned long long)atomic_load(&g_vislog_reports), (unsigned long long)atomic_load(&g_vislog_zero), (unsigned long long)atomic_load(&g_vislog_cond), (unsigned long long)atomic_load(&g_vislog_skips));
     if (atomic_load(&g_trickle_n)) MLOG("[trickle] up to frame %llu: %llu pools, %.0f MB put into the residency set ahead of the raw memory table", frame, (unsigned long long)atomic_load(&g_trickle_n), atomic_load(&g_trickle_bytes) / 1048576.0);
     if (g_preread <= 0) return;
     MLOG("[preread] up to frame %llu: %llu ranges, %.0f MB asked to be read ahead, %.1f ms in the calls, %llu failed (range gone), %llu skipped (asked within 2 s)", frame, (unsigned long long)atomic_load(&g_preread_n),
@@ -5481,6 +5491,7 @@ static void pool_census(unsigned long long frame) {
 }
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     if (!(frame % 600)) { pool_census(frame); preread_report(frame); }
+    if (g_vislog > 0 && !(frame % 150)) vislog_summary(frame, "up to");
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
@@ -17607,7 +17618,7 @@ void mtl_exec(const uint8_t *p) {
                 g_mdx_epoch++;
                 break;
             case OP_DRAW: { if (g_rc_skip) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
-            case OP_DRAW_IDX: { if (vislog_on()) { p_draw_idx lt; const p_draw_idx *ld = draw_idx_rec(a, h.size, &lt); if (ld->count == g_vislog) vislog_cond(g_rc_skip, ld->ind != 0); }
+            case OP_DRAW_IDX: { if (vislog_on()) { p_draw_idx lt; const p_draw_idx *ld = draw_idx_rec(a, h.size, &lt); if (ld->count == g_vislog) { uint64_t fr = atomic_load(&g_cur_frame); if (!atomic_fetch_add(&g_vislog_seen, 1)) atomic_store(&g_vislog_first, fr); atomic_store(&g_vislog_last, fr); vislog_cond(g_rc_skip, ld->ind != 0); } }
                 if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);
