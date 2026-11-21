@@ -108,6 +108,17 @@ int main(void) {
     vislog_rec(&d, 36, (void *)(uintptr_t)((uint64_t)(uintptr_t)g_fake_main.base + 0x27ff80), own);
     CHECK("a draw from another caller names no entry", g_vl_nent == 1);
     CHECK("the entry is read back", dm_vislog_entries_dump("test at", 0) == 1);
+    // the render queue's unit pointing at the entry's object (+0x68), and an element pointing at the unit (+0x10)
+    static uint64_t unit[16] __attribute__((aligned(16))), elem[4] __attribute__((aligned(16)));
+    unit[0x68 / 8] = (uint64_t)(uintptr_t)objmem; unit[0x54 / 8] = 0x1234; elem[2] = (uint64_t)(uintptr_t)unit;
+    uint64_t hits[16]; int nh = vl_scan_refs((uint64_t)(uintptr_t)objmem, (uint64_t)(uintptr_t)objmem - (8u << 20), (uint64_t)(uintptr_t)objmem + (8u << 20), hits, 16), found = 0;
+    for (int i = 0; i < nh; i++) if (hits[i] == (uint64_t)(uintptr_t)&unit[0x68 / 8]) found = 1;
+    CHECK("the scan finds the unit's pointer to the object", found);
+    nh = vl_scan_refs((uint64_t)(uintptr_t)unit, (uint64_t)(uintptr_t)objmem - (8u << 20), (uint64_t)(uintptr_t)objmem + (8u << 20), hits, 16); found = 0;
+    for (int i = 0; i < nh; i++) if (hits[i] == (uint64_t)(uintptr_t)&elem[2]) found = 1;
+    CHECK("the scan finds the element's pointer to the unit", found);
+    CHECK("an unmapped range is skipped, not read", vl_scan_refs(1, 0x1000, 0x200000, hits, 16) == 0);
+    CHECK("the dump lists at least that unit", dm_vislog_units_dump("test at", 0) >= 1);
     draw(&d, 36);   // a real record, so the recording holds command memory (the calls above only exercised the hook)
     h_nvnCommandBufferEndRecording(&d);
     unsigned before = atomic_load(&g_vl_used_logs);

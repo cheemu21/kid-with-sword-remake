@@ -1232,6 +1232,42 @@ static void vl_entry_note(void *fp, uint32_t rec_id) {
     if (i < VL_ENTS) g_vl_ent[i].rec_id = rec_id;
     pthread_mutex_unlock(&g_vl_mu);
 }
+// The structures that point at an object: a pass over [lo, hi) for 8-byte words equal to target, page by page, only pages in memory (mincore), each read through vm_read
+// (a resident page may still be protected, and a read through vm_read fails instead of faulting). Returns the hits found (up to max)
+static int vl_scan_refs(uint64_t target, uint64_t lo, uint64_t hi, uint64_t *hits, int max) {
+    enum { CH = 1u << 20 }; static uint8_t page[16384]; size_t pg = (size_t)getpagesize(); if (pg > sizeof page) return 0;
+    int n = 0; lo &= ~(uint64_t)(CH - 1);
+    for (uint64_t a = lo; a < hi && n < max; a += CH) {
+        char vec[CH / 4096]; if (mincore((void *)(uintptr_t)a, CH, vec)) continue;   // not mapped (in part): skip the chunk
+        for (size_t k = 0; k < CH / pg && n < max; k++) {
+            if (!(vec[k] & 1)) continue;
+            uint64_t pa = a + k * pg; if (!vl_rd(pa, page, pg)) continue;
+            for (size_t o = 0; o < pg && n < max; o += 8) { uint64_t v; memcpy(&v, page + o, 8); if (v == target) hits[n++] = pa + o; }
+        }
+    }
+    return n;
+}
+// DM_NVN_VISLOG (Ocarina of Time): the render queue reaches a piece entry through a draw unit whose +0x68 is the piece object (main+0x6d8c4) and a queue element whose +0x10 is the
+// unit (main+0x6d71c). The units pointing at a logged entry's object, and elements pointing at those, are found in the 64 MB around the object and dumped (the first 0x80 /
+// 0x20 bytes), so the unit of a piece the game draws can be compared with the unit of one it skips
+int dm_vislog_units_dump(const char *why, unsigned long long frame) {   // returns the units found
+    if (vislog_want() <= 0) return 0;
+    pthread_mutex_lock(&g_vl_mu); uint64_t obj = g_vl_nent ? g_vl_ent[0].obj : 0; pthread_mutex_unlock(&g_vl_mu);
+    if (!obj) return 0;
+    uint64_t lo = obj > (64ull << 20) ? obj - (64ull << 20) : 0, hi = obj + (64ull << 20), hits[16], el[8]; int n = vl_scan_refs(obj, lo, hi, hits, 16), units = 0;
+    LOG("[vislog] %s frame %llu: %d words pointing at object %#llx in the 128 MB around it", why, frame, n, (unsigned long long)obj);
+    for (int i = 0; i < n; i++) {
+        if (hits[i] < 0x68) continue;
+        uint64_t u = hits[i] - 0x68, w[16]; if (!vl_rd(u, w, sizeof w)) continue; units++;
+        char line[600]; int q = snprintf(line, sizeof line, "[vislog]   if a unit at %#llx (pointer at +0x68):", (unsigned long long)u);
+        for (int k = 0; k < 16; k++) q += snprintf(line + q, sizeof line - q, " %016llx", (unsigned long long)w[k]);
+        LOG("%s", line);
+        int ne = vl_scan_refs(u, lo, hi, el, 8);
+        for (int e = 0; e < ne; e++) { uint64_t x[4]; if (el[e] < 0x10 || !vl_rd(el[e] - 0x10, x, sizeof x)) continue;
+            LOG("[vislog]     pointed at from %#llx (if an element, +0x10): %016llx %016llx %016llx %016llx", (unsigned long long)el[e], (unsigned long long)x[0], (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[3]); }
+    }
+    return units;
+}
 int dm_vislog_entries_dump(const char *why, unsigned long long frame) {   // returns the entries read
     if (vislog_want() <= 0) return 0;
     vl_ent e[VL_ENTS]; pthread_mutex_lock(&g_vl_mu); int n = g_vl_nent; memcpy(e, g_vl_ent, sizeof e); pthread_mutex_unlock(&g_vl_mu);
