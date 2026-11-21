@@ -1459,12 +1459,17 @@ static int vislog_on(void) { if (g_vislog < 0) { const char *e = getenv("DM_NVN_
 static uint64_t g_vis_prov; static _Atomic int32_t g_vis_pend[4096];
 static unsigned vis_ph(uint64_t a) { return (unsigned)(((a >> 4) * 0x9E3779B97F4A7C15ull) >> 52); }
 static int vis_prov_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_VIS_PROVISIONAL"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_VIS_PROVISIONAL=0: a samples-passed record holds what it held until its submission completes"); } return on; }
+// DM_NVN_VIS_ALL=1 (test, kid-with-sword-remake L7.9): every samples-passed report reads visible. The count written is the real one plus a bias that grows by 2^20 a report, so a
+// game reading one count, or end - begin of two, sees a large one, and a conditional render comparing two records draws; a record still 0 when the game records its report reads 1.
+// It makes the game draw what its occlusion queries would cull (more GPU work), so it shows whether a piece the game stopped drawing (the Goku mod's body) was dropped by a query
+static int vis_all_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_VIS_ALL"); on = e && atoi(e) > 0; if (on) MLOG("DM_NVN_VIS_ALL=1: every samples-passed report reads visible (test)"); } return on; }
+static uint64_t g_vis_bias;
 void mtl_vis_report_recorded(uint64_t ad) {
-    if (!ad || (ad & 7) || !vis_prov_on()) return;
+    if (!ad || (ad & 7) || !(vis_prov_on() || vis_all_on())) return;
     int32_t pend = atomic_fetch_add_explicit(&g_vis_pend[vis_ph(ad)], 1, memory_order_acq_rel);
     uint64_t rec[2]; vm_size_t got = 0;
     if (vm_read_overwrite(mach_task_self(), (vm_address_t)ad, sizeof rec, (vm_address_t)rec, &got) || got != sizeof rec) return;   // not readable: leave it to the completion
-    if (rec[0] || (rec[1] && pend <= 0)) return;   // a count, or a 0 its last completed report wrote
+    if (rec[0] || (rec[1] && pend <= 0 && !vis_all_on())) return;   // a count, or a 0 its last completed report wrote
     uint64_t one = 1; memcpy((void *)ad, &one, sizeof one);
     if (g_vis_prov++ < 4 || !(g_vis_prov & (g_vis_prov - 1))) MLOG("occlusion queries: record %#llx read 0 (%s), reads 1 (visible) until its report completes (%llu so far)", (unsigned long long)ad, rec[1] ? "its previous report still running" : "never written", (unsigned long long)g_vis_prov);
 }
@@ -2762,7 +2767,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             if (ops[i].mode == VIS_ZERO) { g_vis_acc = 0; continue; }
             vis_list *l = ops[i].vis;
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); vis_report_done(ops[i].addr);
+            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc + (vis_all_on() ? (g_vis_bias += 1u << 20) : 0), gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); vis_report_done(ops[i].addr);
                 if (ops[i].type & 0x80000000u) { uint64_t nr = atomic_fetch_add(&g_vislog_reports, 1) + 1; if (!g_vis_acc) atomic_fetch_add(&g_vislog_zero, 1);
                     if (!g_vis_acc || nr % 30 == 1) MLOG("[vislog] frame %llu record %#llx: %llu samples passed (report %llu, %llu of them 0)", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)ops[i].addr, (unsigned long long)g_vis_acc, (unsigned long long)nr, (unsigned long long)atomic_load(&g_vislog_zero)); } }
         }
