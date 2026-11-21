@@ -1525,7 +1525,8 @@ static void vislog_summary(unsigned long long frame, const char *why) {
          (unsigned long long)atomic_load(&g_vislog_first), (unsigned long long)atomic_load(&g_vislog_last));
     p_seen = seen; p_drawn = drawn; p_rep = rep; p_zero = zero; p_cond = cond; p_skip = skip; p_frame = frame;
     dm_vislog_entries_dump(why, frame);
-    if (!(frame % 600) || why[0] == 's') { census_dump(frame, why); dm_vislog_sites_dump(why, frame); dm_vislog_units_dump(why, frame); }
+    if (!(frame % 600) || why[0] == 's') { census_dump(frame, why); dm_vislog_sites_dump(why, frame); }
+    dm_vislog_units_dump(why, frame);   // each summary (150 frames): a launch whose world loads after a 600-frame mark is covered too
 }
 typedef struct { void *buf; uint32_t slot; } vis_slot;
 typedef struct { int n; vis_slot s[]; } vis_list;

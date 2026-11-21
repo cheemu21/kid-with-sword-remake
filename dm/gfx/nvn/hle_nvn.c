@@ -1281,15 +1281,21 @@ static int vl_unit_dump(uint64_t u, const char *why, unsigned long long frame) {
         q += snprintf(line + q, sizeof line - q, " slot %d row %d %s", slot, idx, !ok ? "unreadable" : prog ? "program" : "NO PROGRAM");
         nulls += ok && !prog;
     }
-    LOG("%s", line); return nulls;
+    LOG("%s", line);
+    uint64_t w[64]; if (vl_rd(u, w, sizeof w))   // the whole first 0x200 bytes, for a launch-to-launch diff
+        for (int r = 0; r < 64; r += 8) LOG("[vislog]     unit %#llx +0x%03x: %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx", (unsigned long long)u, r * 8,
+            (unsigned long long)w[r], (unsigned long long)w[r+1], (unsigned long long)w[r+2], (unsigned long long)w[r+3], (unsigned long long)w[r+4], (unsigned long long)w[r+5], (unsigned long long)w[r+6], (unsigned long long)w[r+7]);
+    return nulls;
 }
 // The render queue elements naming a draw unit at +0x10 (main+0x6d71c) in [lo, hi): logged with their first 0x30 bytes; returns the words found
 static int vl_unit_elements(uint64_t u, uint64_t lo, uint64_t hi, const char *why, unsigned long long frame) {
     uint64_t el[32]; int ne = vl_scan_all(u, lo, hi, el, 32);
     LOG("[vislog] %s frame %llu: %d words pointing at draw unit %#llx", why, frame, ne, (unsigned long long)u);
-    for (int e = 0; e < ne; e++) { uint64_t x[6]; if (el[e] < 0x10 || !vl_rd(el[e] - 0x10, x, sizeof x)) continue;
-        LOG("[vislog]   at %#llx (if a queue element, +0x10): %016llx %016llx %016llx %016llx %016llx %016llx", (unsigned long long)el[e], (unsigned long long)x[0], (unsigned long long)x[1],
-            (unsigned long long)x[2], (unsigned long long)x[3], (unsigned long long)x[4], (unsigned long long)x[5]); }
+    for (int e = 0; e < ne; e++) { uint64_t x[8]; if (el[e] < 0x10 || !vl_rd(el[e] - 0x10, x, sizeof x)) continue;
+        char line[400]; int q = snprintf(line, sizeof line, "[vislog]   at %#llx (if a queue element, +0x10):", (unsigned long long)el[e]);
+        for (int k = 0; k < 8; k++) q += snprintf(line + q, sizeof line - q, " %016llx", (unsigned long long)x[k]);
+        float f0; memcpy(&f0, x, 4); snprintf(line + q, sizeof line - q, " (+0 as a float %g)", (double)f0);
+        LOG("%s", line); }
     return ne;
 }
 // DM_NVN_VISLOG (Ocarina of Time): the render queue reaches a piece entry through a draw unit whose +0x68 is the piece object (main+0x6d8c4) and a queue element whose +0x10 is the
@@ -1301,12 +1307,12 @@ int dm_vislog_units_dump(const char *why, unsigned long long frame) {   // retur
     if (!obj) return 0;
     uint64_t lo = obj > (64ull << 20) ? obj - (64ull << 20) : 0, hi = obj + (64ull << 20), hits[16], el[8]; int n = vl_scan_refs(obj, lo, hi, hits, 16), units = 0;
     LOG("[vislog] %s frame %llu: %d words pointing at object %#llx in the 128 MB around it", why, frame, n, (unsigned long long)obj);
-    if (why[0] != 's') { uint64_t all[64]; int na = vl_scan_all(obj, 0x7000000000ull, 0x7800000000ull, all, 64), nu = 0;   // every draw unit naming the object at +0x68, wherever it is (not at a suspend: the app is going to the background)
+    if (why[0] != 's') { uint64_t all[64], t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); int na = vl_scan_all(obj, 0x7000000000ull, 0x7800000000ull, all, 64), nu = 0;   // every draw unit naming the object at +0x68, wherever it is (not at a suspend: the app is going to the background)
       for (int i = 0; i < na; i++) {
           if (all[i] < 0x68 || vl_unit_dump(all[i] - 0x68, why, frame) < 0) continue;
           nu++; vl_unit_elements(all[i] - 0x68, 0x7000000000ull, 0x7800000000ull, why, frame);
       }
-      LOG("[vislog] %s frame %llu: %d words pointing at the object in the guest range, %d of them at +0x68 of a draw unit", why, frame, na, nu); }
+      LOG("[vislog] %s frame %llu: %d words pointing at the object in the guest range, %d of them at +0x68 of a draw unit (%.0f ms in all)", why, frame, na, nu, (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6); }
     for (int i = 0; i < n; i++) {
         if (hits[i] < 0x68) continue;
         uint64_t u = hits[i] - 0x68, w[16]; if (!vl_rd(u, w, sizeof w)) continue; units++;
