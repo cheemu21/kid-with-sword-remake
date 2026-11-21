@@ -216,6 +216,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Pool table statistics raced with buffer replacement](../../../docs/reference/nvn-objects.md#pool-table-statistics-raced-with-buffer-replacement). The Mac L7.6 build crashed while logging frame 54,600 after about 15 minutes of play on 2026-11-21. The host fix protects the statistics read.
 - [Live BUFFER ordering and mapping](../../../docs/reference/rendering.md#sampled-buffer-reads-follow-source-writes-and-mappings): synthetic source-review proof for issue #2247. No Ocarina floor/glow artifact or performance improvement is attributed to this change.
 
 - [Private buffer texture fallback API guards](../../../docs/reference/rendering.md#private-buffer-texture-fallbacks-must-not-query-cpu-contents): synthetic source-review tests reproduce a validation abort when the existing unsupported-storage fallback queries private buffer contents. The guard preserves that fallback; GPU snapshot ordering and Ocarina artifact reachability remain open.
