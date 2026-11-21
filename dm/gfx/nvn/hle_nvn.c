@@ -1235,17 +1235,53 @@ static void vl_entry_note(void *fp, uint32_t rec_id) {
 // The structures that point at an object: a pass over [lo, hi) for 8-byte words equal to target, page by page, only pages in memory (mincore), each read through vm_read
 // (a resident page may still be protected, and a read through vm_read fails instead of faulting). Returns the hits found (up to max)
 static int vl_scan_refs(uint64_t target, uint64_t lo, uint64_t hi, uint64_t *hits, int max) {
-    enum { CH = 1u << 20 }; static uint8_t page[16384]; size_t pg = (size_t)getpagesize(); if (pg > sizeof page) return 0;
-    int n = 0; lo &= ~(uint64_t)(CH - 1);
-    for (uint64_t a = lo; a < hi && n < max; a += CH) {
-        char vec[CH / 4096]; if (mincore((void *)(uintptr_t)a, CH, vec)) continue;   // not mapped (in part): skip the chunk
-        for (size_t k = 0; k < CH / pg && n < max; k++) {
+    enum { CH = 1u << 20 }; static uint8_t page[16384]; size_t pg = (size_t)getpagesize(); if (pg > sizeof page || hi <= lo) return 0;
+    int n = 0; lo &= ~(uint64_t)(pg - 1);
+    for (uint64_t a = lo, len; a < hi && n < max; a += len) {
+        len = hi - a < CH ? ((hi - a + pg - 1) & ~(uint64_t)(pg - 1)) : CH;
+        char vec[CH / 4096]; if (mincore((void *)(uintptr_t)a, len, vec)) continue;   // not mapped (in part): skip the chunk
+        for (size_t k = 0; k < len / pg && n < max; k++) {
             if (!(vec[k] & 1)) continue;
             uint64_t pa = a + k * pg; if (!vl_rd(pa, page, pg)) continue;
             for (size_t o = 0; o < pg && n < max; o += 8) { uint64_t v; memcpy(&v, page + o, 8); if (v == target) hits[n++] = pa + o; }
         }
     }
     return n;
+}
+// The same pass over every readable region of the guest range [lo, hi) (mach_vm_region), for the structures that may lie anywhere in the game's heap
+static int vl_scan_all(uint64_t target, uint64_t lo, uint64_t hi, uint64_t *hits, int max) {
+    int n = 0; vm_address_t a = (vm_address_t)lo;   // vm_region_64 (mach/mach.h): mach_vm.h is not for iOS
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    while (a < hi && n < max && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 < 2000000000ull) {   // at most 2 s: a diagnostic must not stall the game long
+        vm_size_t sz = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS || a >= hi) break;
+        if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+        uint64_t e = a + sz < hi ? a + sz : hi;
+        if (info.protection & VM_PROT_READ) n += vl_scan_refs(target, a, e, hits + n, max - n);
+        a += sz;
+    }
+    return n;
+}
+// A render queue draw unit (main+0x6fc00, the filter the queue asks before drawing a unit in a pass): the program index of each pass slot is the signed byte at +0x3b + slot
+// (-1: a default program), the program table is at +0x60 with +0x5f bytes a row, and a row whose first word is 0 makes the filter return false, so the unit is not drawn in that
+// pass (main+0x73cbc). Checks the layout, logs the unit, and returns how many of its slots name a row with no program (-1 when it is not such a unit)
+static int vl_unit_dump(uint64_t u, const char *why, unsigned long long frame) {
+    uint8_t b[0x70]; if (!vl_rd(u, b, sizeof b)) return -1;
+    uint64_t tab; memcpy(&tab, b + 0x60, 8); unsigned stride = b[0x5f];
+    if (!stride || stride > 0x100 || tab < 0x1000000 || (tab & 7)) return -1;
+    char line[900]; int q = snprintf(line, sizeof line, "[vislog] %s frame %llu: draw unit %#llx: bytes +0x18..+0x1f", why, frame, (unsigned long long)u);
+    for (int k = 0x18; k < 0x20; k++) q += snprintf(line + q, sizeof line - q, " %02x", b[k]);
+    q += snprintf(line + q, sizeof line - q, ", +0x2c..+0x4b"); for (int k = 0x2c; k < 0x4c; k++) q += snprintf(line + q, sizeof line - q, " %02x", b[k]);
+    q += snprintf(line + q, sizeof line - q, ", +0x54..+0x5f"); for (int k = 0x54; k < 0x60; k++) q += snprintf(line + q, sizeof line - q, " %02x", b[k]);
+    q += snprintf(line + q, sizeof line - q, "; program table %#llx (%u bytes a row):", (unsigned long long)tab, stride);
+    int nulls = 0;
+    for (int slot = 0; slot < 16 && q < (int)sizeof line - 40; slot++) {
+        int8_t idx = (int8_t)b[0x3b + slot]; if (idx < 0) continue;
+        uint64_t prog = 0; int ok = vl_rd(tab + (uint64_t)idx * stride, &prog, 8);
+        q += snprintf(line + q, sizeof line - q, " slot %d row %d %s", slot, idx, !ok ? "unreadable" : prog ? "program" : "NO PROGRAM");
+        nulls += ok && !prog;
+    }
+    LOG("%s", line); return nulls;
 }
 // DM_NVN_VISLOG (Ocarina of Time): the render queue reaches a piece entry through a draw unit whose +0x68 is the piece object (main+0x6d8c4) and a queue element whose +0x10 is the
 // unit (main+0x6d71c). The units pointing at a logged entry's object, and elements pointing at those, are found in the 64 MB around the object and dumped (the first 0x80 /
@@ -1256,6 +1292,9 @@ int dm_vislog_units_dump(const char *why, unsigned long long frame) {   // retur
     if (!obj) return 0;
     uint64_t lo = obj > (64ull << 20) ? obj - (64ull << 20) : 0, hi = obj + (64ull << 20), hits[16], el[8]; int n = vl_scan_refs(obj, lo, hi, hits, 16), units = 0;
     LOG("[vislog] %s frame %llu: %d words pointing at object %#llx in the 128 MB around it", why, frame, n, (unsigned long long)obj);
+    if (why[0] != 's') { uint64_t all[64]; int na = vl_scan_all(obj, 0x7000000000ull, 0x7800000000ull, all, 64), nu = 0;   // every draw unit naming the object at +0x68, wherever it is (not at a suspend: the app is going to the background)
+      for (int i = 0; i < na; i++) if (all[i] >= 0x68 && vl_unit_dump(all[i] - 0x68, why, frame) >= 0) nu++;
+      LOG("[vislog] %s frame %llu: %d words pointing at the object in the guest range, %d of them at +0x68 of a draw unit", why, frame, na, nu); }
     for (int i = 0; i < n; i++) {
         if (hits[i] < 0x68) continue;
         uint64_t u = hits[i] - 0x68, w[16]; if (!vl_rd(u, w, sizeof w)) continue; units++;

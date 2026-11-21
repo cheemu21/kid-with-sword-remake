@@ -119,6 +119,20 @@ int main(void) {
     CHECK("the scan finds the element's pointer to the unit", found);
     CHECK("an unmapped range is skipped, not read", vl_scan_refs(1, 0x1000, 0x200000, hits, 16) == 0);
     CHECK("the dump lists at least that unit", dm_vislog_units_dump("test at", 0) >= 1);
+    nh = vl_scan_refs((uint64_t)(uintptr_t)unit, (uint64_t)(uintptr_t)&elem[0], (uint64_t)(uintptr_t)&elem[4], hits, 16);
+    CHECK("a range smaller than a page, not on a chunk boundary, is still scanned", nh == 1 && hits[0] == (uint64_t)(uintptr_t)&elem[2]);
+    nh = vl_scan_all((uint64_t)(uintptr_t)objmem, (uint64_t)(uintptr_t)objmem - (8u << 20), (uint64_t)(uintptr_t)objmem + (8u << 20), hits, 16); found = 0;
+    for (int i = 0; i < nh; i++) if (hits[i] == (uint64_t)(uintptr_t)&unit[0x68 / 8]) found = 1;
+    CHECK("the region-by-region scan finds the unit's pointer too", found);
+    // a draw unit's program table: slot 0 names row 0 (a program), slot 1 row 1 (none), the other slots -1 (a default program)
+    static uint8_t du[0x70] __attribute__((aligned(16))); static uint64_t prog_tab[4] __attribute__((aligned(16)));
+    prog_tab[0] = 0x5000; prog_tab[2] = 0;   // rows of 16 bytes: row 0 = {0x5000, 0}, row 1 = {0, 0}
+    memset(du + 0x3b, 0xff, 16); du[0x3b] = 0; du[0x3c] = 1; du[0x5f] = 16; uint64_t tp = (uint64_t)(uintptr_t)prog_tab; memcpy(du + 0x60, &tp, 8);
+    CHECK("a draw unit with one slot naming a row with no program counts 1", vl_unit_dump((uint64_t)(uintptr_t)du, "test at", 0) == 1);
+    prog_tab[2] = 0x6000;
+    CHECK("with both rows holding a program it counts 0", vl_unit_dump((uint64_t)(uintptr_t)du, "test at", 0) == 0);
+    du[0x5f] = 0;
+    CHECK("a structure without a unit's layout is not taken for one", vl_unit_dump((uint64_t)(uintptr_t)du, "test at", 0) == -1);
     draw(&d, 36);   // a real record, so the recording holds command memory (the calls above only exercised the hook)
     h_nvnCommandBufferEndRecording(&d);
     unsigned before = atomic_load(&g_vl_used_logs);
