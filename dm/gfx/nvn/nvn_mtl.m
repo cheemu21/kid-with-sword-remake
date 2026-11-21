@@ -12335,10 +12335,13 @@ static id<MTLBuffer> pool_patch_take(const pool_snap *q) {
 // The power line's pool table counts (hle_nvn.c): builds, their time (us), patched, kept, of those over pool changes and over a new submission; patches into a spare of their own and the entries
 // that took, patches copied whole (no spare of their own, none finished, the log past them), the patches' copy and replay time (us); the bytes of the tables' buffers in use and spare
 void mtl_pool_stats(uint64_t s[POOL_STATS]) {
+    // The submit thread can replace a table's Metal buffer while the presentation thread reads these counts.
+    os_unfair_lock_lock(&g_rmu);
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     uint64_t used = 0; for (int k = 0; k < POOL_SNAPS; k++) if (g_psnap[k].buf) used += g_psnap[k].buf.length;
     uint64_t v[POOL_STATS] = {g_stat_pool_builds, (uint64_t)(g_stat_pool_ms * 1000), g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_pchg, g_stat_pool_schg, g_stat_pool_replayed, g_stat_pool_replay_n,
         g_stat_pool_copied[0], g_stat_pool_copied[1], g_stat_pool_copied[2], g_stat_pool_take_ns * tb.numer / tb.denom / 1000, used, g_pool_spare_bytes};
+    os_unfair_lock_unlock(&g_rmu);
     memcpy(s, v, sizeof v);
 }
 // One entry of a pool table, as the walk takes it: the resource ID of what the ID holds (0: nothing of the type, or a texture not made). gone counts IDs without storage, and *dead is set for
