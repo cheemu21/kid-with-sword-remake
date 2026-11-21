@@ -1174,6 +1174,7 @@ enum { VL_SLOTS = 64 };
 static struct { const void *cb; uint32_t rec_id, marks; } g_vl_cb[VL_SLOTS];
 static struct { uint64_t handle; uint32_t rec_id, marks; } g_vl_h[VL_SLOTS]; static unsigned g_vl_h_next;
 static pthread_mutex_t g_vl_mu = PTHREAD_MUTEX_INITIALIZER;
+static const void *g_vl_end_cb; static _Atomic unsigned g_vl_used_logs;   // the command buffer that last ended a recording holding the logged draw (vl_used)
 _Atomic uint64_t dm_vislog_recorded, dm_vislog_ended, dm_vislog_submitted, dm_vislog_restarted;
 static int vislog_want(void) { static int want = -1; if (want < 0) { const char *e = getenv("DM_NVN_VISLOG"); want = e ? atoi(e) : 0; } return want; }
 static int vl_cb_find(const void *cb, int add) {   // under g_vl_mu
@@ -1190,6 +1191,7 @@ static void vl_begin(const cmd_t *o, const void *cb) {   // a recording begun on
     if (vislog_want() <= 0) return;
     pthread_mutex_lock(&g_vl_mu); int i = vl_cb_find(cb, 0); uint32_t m = 0, id = 0;
     if (i >= 0) { m = g_vl_cb[i].marks; id = g_vl_cb[i].rec_id; g_vl_cb[i].cb = NULL; }
+    if (g_vl_end_cb == cb) g_vl_end_cb = NULL;   // a new recording: later reads are about it
     pthread_mutex_unlock(&g_vl_mu);
     if (m) { uint64_t k = atomic_fetch_add(&dm_vislog_restarted, m) + m; LOG("[vislog] recording %u of command buffer %p, holding %u draws of %d indices, was begun again (now %u) without EndRecording at frame %llu (%llu such draws so far)", id, cb, m, vislog_want(), o->rec_id, (unsigned long long)dm_nvn_frame_count(), (unsigned long long)k); }
 }
@@ -1198,7 +1200,7 @@ static void vl_end(const cmd_t *o, const void *cb, uint64_t handle) {   // the r
     pthread_mutex_lock(&g_vl_mu); int i = vl_cb_find(cb, 0); uint32_t m = 0, id = 0;
     if (i >= 0 && g_vl_cb[i].rec_id == o->rec_id) { m = g_vl_cb[i].marks; id = g_vl_cb[i].rec_id; }
     if (i >= 0) g_vl_cb[i].cb = NULL;
-    if (m) { unsigned k = g_vl_h_next++ % VL_SLOTS; g_vl_h[k].handle = handle; g_vl_h[k].rec_id = id; g_vl_h[k].marks = m; }
+    if (m) { unsigned k = g_vl_h_next++ % VL_SLOTS; g_vl_h[k].handle = handle; g_vl_h[k].rec_id = id; g_vl_h[k].marks = m; g_vl_end_cb = cb; }
     pthread_mutex_unlock(&g_vl_mu);
     if (m) { static _Atomic unsigned nlog; atomic_fetch_add(&dm_vislog_ended, m); if (atomic_fetch_add(&nlog, 1) < 12) LOG("[vislog] recording %u of command buffer %p ended at frame %llu holding %u draws of %d indices: handle %#llx", id, cb, (unsigned long long)dm_nvn_frame_count(), m, vislog_want(), (unsigned long long)handle); }
 }
@@ -1206,6 +1208,50 @@ static uint32_t vl_handle(uint64_t handle, uint32_t *rec_id) {   // the marked d
     uint32_t m = 0; pthread_mutex_lock(&g_vl_mu);
     for (int i = 0; i < VL_SLOTS; i++) if (g_vl_h[i].handle == handle && g_vl_h[i].marks) { m = g_vl_h[i].marks; if (rec_id) *rec_id = g_vl_h[i].rec_id; break; }
     pthread_mutex_unlock(&g_vl_mu); return m;
+}
+// DM_NVN_VISLOG, Ocarina of Time only (kid-with-sword-remake L7.9): the game's own record of a piece whose draw is logged. Its setup (main+0x273890) records each piece entry of a
+// model object (0x270 bytes each, the array at +0x638, the count in the byte at +0x69c) into a command buffer of its own, keeps the handle at entry +0x50, reads
+// GetControlMemoryUsed into +0x4c and GetCommandMemoryUsed into +0x2c, and sets bit 0 of +0x58 when either is not 0; every frame its render queue calls the handle only
+// while that bit is set (main+0x6d938). Recording the draw, main+0x27fef0 (its call returns to main+0x273ba0) saved that function's x21 (the entry index) at x29+0x38 and x20
+// (the object) at x29+0x40, so the draw's first game frame names the entry; dm_vislog_entries_dump reads it back each summary, on launches where the piece shows and where not
+enum { VL_ENTS = 8, VL_ENT_RA = 0x273ba0, VL_ENT_ARRAY = 0x638, VL_ENT_SIZE = 0x270, VL_ENT_COUNT = 0x69c };
+typedef struct { uint64_t obj, idx; uint32_t rec_id; } vl_ent;
+static vl_ent g_vl_ent[VL_ENTS]; static int g_vl_nent;
+static int vl_rd16(uint64_t f, uint64_t rec[2]);
+static int vl_pc_name(char *out, size_t n, uint64_t pc);
+static int vl_rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a && !vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) && got == n; }
+static void vl_entry_note(void *fp, uint32_t rec_id) {
+    if (!fp) return;
+    uint64_t f = *(const uint64_t *)fp, rec[2], sv[2];   // this function's own frame record: its saved x29 is the game's frame (tail-jump thunk)
+    if (!f || (f & 15) || !vl_rd16(f, rec)) return;
+    module_t *m = module_of((const void *)(uintptr_t)rec[1]);
+    if (!m || strcmp(m->name, "main") || rec[1] - (uint64_t)(uintptr_t)m->base != VL_ENT_RA || !vl_rd16(f + 0x38, sv)) return;
+    pthread_mutex_lock(&g_vl_mu);
+    int i = 0; while (i < g_vl_nent && !(g_vl_ent[i].obj == sv[1] && g_vl_ent[i].idx == sv[0])) i++;
+    if (i == g_vl_nent && g_vl_nent < VL_ENTS) { g_vl_ent[i].obj = sv[1]; g_vl_ent[i].idx = sv[0]; g_vl_nent++; }
+    if (i < VL_ENTS) g_vl_ent[i].rec_id = rec_id;
+    pthread_mutex_unlock(&g_vl_mu);
+}
+int dm_vislog_entries_dump(const char *why, unsigned long long frame) {   // returns the entries read
+    if (vislog_want() <= 0) return 0;
+    vl_ent e[VL_ENTS]; pthread_mutex_lock(&g_vl_mu); int n = g_vl_nent; memcpy(e, g_vl_ent, sizeof e); pthread_mutex_unlock(&g_vl_mu);
+    int nread = 0;
+    for (int i = 0; i < n; i++) {
+        uint64_t arr = 0, h = 0; uint8_t cnt[4] = {0}, ent[0x60]; uint32_t cmd = 0, ctl = 0;
+        if (!vl_rd(e[i].obj + VL_ENT_ARRAY, &arr, 8) || !vl_rd(e[i].obj + VL_ENT_COUNT, cnt, 4) || !vl_rd(arr + e[i].idx * VL_ENT_SIZE, ent, sizeof ent)) {
+            LOG("[vislog] %s frame %llu: entry %llu of object %#llx (recording %u) not readable", why, frame, (unsigned long long)e[i].idx, (unsigned long long)e[i].obj, e[i].rec_id); continue; }
+        memcpy(&h, ent + 0x50, 8); memcpy(&cmd, ent + 0x2c, 4); memcpy(&ctl, ent + 0x4c, 4); nread++;
+        LOG("[vislog] %s frame %llu: entry %llu of object %#llx (recording %u): handle %#llx, flags %#x (ready %d), command memory used %u, control memory used %u; object: %u entries, bytes +0x69d..+0x69f %u %u %u",
+            why, frame, (unsigned long long)e[i].idx, (unsigned long long)e[i].obj, e[i].rec_id, (unsigned long long)h, ent[0x58], ent[0x58] & 1, cmd, ctl, cnt[0], cnt[1], cnt[2], cnt[3]);
+    }
+    return nread;
+}
+// The command buffer that last ended a recording holding a draw of the logged size: what GetCommandMemoryUsed / GetControlMemoryUsed tell the game right after
+static void vl_used(const void *cb, const char *what, size_t v, void *ra) {
+    if (vislog_want() <= 0 || !cb || cb != g_vl_end_cb || atomic_fetch_add(&g_vl_used_logs, 1) >= 24) return;
+    const cmd_t *o = (const cmd_t *)cb; char w[64]; vl_pc_name(w, sizeof w, (uint64_t)(uintptr_t)ra);
+    LOG("[vislog] %s memory used read as %zu after a recording holding a draw of %d indices (command buffer %p, called from %s; begin %p, used %llu, command memory %llu, control memory %u of which %u used)",
+        what, v, vislog_want(), cb, w, (const void *)o->begin, (unsigned long long)o->used, (unsigned long long)o->cmd_size, o->ctl_size, o->ctl_used);
 }
 NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
@@ -1741,7 +1787,7 @@ NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimit
 // the call site in the game), to find the code that decides whether a mod's piece (the Goku mod's body) is drawn
 static void vislog_rec(NVNcommandBuffer *c, int n, void *ra, void *fp) {
     int want = vislog_want(); if (want <= 0 || n != want) return;
-    const cmd_t *o = CB(c); vl_mark(o, c, 1);
+    const cmd_t *o = CB(c); vl_mark(o, c, 1); vl_entry_note(fp, o->rec_id);
     uint64_t k = atomic_fetch_add(&dm_vislog_recorded, 1) + 1; if (k > 12) return;
     char sl[1200]; int q = snprintf(sl, sizeof sl, "[vislog] recorded draw %llu of %d indices into recording %u of command buffer %p (%s) at frame %llu, called from", (unsigned long long)k, n, o->rec_id, (void *)c,
                                     o->recording ? "recording" : "NOT RECORDING", (unsigned long long)dm_nvn_frame_count());
@@ -3485,10 +3531,10 @@ NVN_NOPROTO(nvnWindowGetNumActiveTextures, int, const NVNwindow *w) { return win
 // command buffer and records every frame into it; its memory callback (main+0x9ca960) takes chunk start + used as the position the GPU has reached and frees the ring up to there when the frame's fence
 // signals. Counted per recording, the position stayed at one frame's size (about 18 KB), the ring never freed past it, and after the first 16 MB (about 15 s) the callback waited for ring space forever
 NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c;
-    return m->begin ? (size_t)m->used : 0; }
+    size_t v = m->begin ? (size_t)m->used : 0; vl_used(c, "command", v, __builtin_return_address(0)); return v; }
 // Control memory: the entries written into the last block, and those still waiting to be written (ctl_q)
 static size_t ctl_used_now(const cmd_t *o) { size_t u = o->ctl_used + 8u * (size_t)(!!o->ctl_q[0] + !!o->ctl_q[1]); return u < o->ctl_size ? u : o->ctl_size; }
-NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { return ctl_used_now((const cmd_t *)c); }
+NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { size_t v = ctl_used_now((const cmd_t *)c); vl_used(c, "control", v, __builtin_return_address(0)); return v; }
 NVN(nvnCommandBufferGetControlMemoryFree, size_t, const NVNcommandBuffer *c) { const cmd_t *o = (const cmd_t *)c; return o->ctl_size - ctl_used_now(o); }
 NVN(nvnCommandBufferGetControlMemorySize, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->ctl_size; }
 // Free bytes of the command memory (DRAGON QUEST XI S, Unreal Engine 4.18): what is left in the current segment

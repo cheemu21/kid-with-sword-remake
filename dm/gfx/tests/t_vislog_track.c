@@ -28,7 +28,9 @@
 
 module_t *g_mod; int g_nmod;
 void *front_metal_layer(void) { return NULL; }
-module_t *module_of(const void *p) { (void)p; return NULL; }
+// A stand-in "main" for the piece-entry readout: return addresses in [base, base + 64 MB) are in it
+static module_t g_fake_main = { .name = "main", .base = (uint8_t *)(uintptr_t)0x100000000ull };
+module_t *module_of(const void *p) { uintptr_t a = (uintptr_t)p, b = (uintptr_t)g_fake_main.base; return a >= b && a < b + (64u << 20) ? &g_fake_main : NULL; }
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 void test_prepare(void) {}
@@ -88,6 +90,35 @@ int main(void) {
     dm_vislog_sites_dump("test at", 0);
     sites = 0; for (int i = 0; i < VL_SITES; i++) if (g_vl_site[i].n) sites++;
     CHECK("listing the chains starts a new count", sites == 0);
+
+    // the game's piece entry: a draw whose first game frame returns to main+0x273ba0 names the entry by that frame's saved x21 (index) and x20 (object)
+    static uint8_t objmem[0x6a0] __attribute__((aligned(16))); static uint8_t ents[3 * 0x270] __attribute__((aligned(16)));
+    uint64_t arr = (uint64_t)(uintptr_t)ents, hv = 0xabc0; uint32_t cmdu = 77, ctlu = 0;
+    memcpy(objmem + 0x638, &arr, 8); objmem[0x69c] = 3; objmem[0x69e] = 2;
+    memcpy(ents + 0x270 + 0x50, &hv, 8); ents[0x270 + 0x58] = 0x05; memcpy(ents + 0x270 + 0x2c, &cmdu, 4); memcpy(ents + 0x270 + 0x4c, &ctlu, 4);
+    static uint64_t gframe[16] __attribute__((aligned(16)));   // 0x27fef0's frame: {x29, x30}, then its saved registers
+    gframe[0] = 0; gframe[1] = (uint64_t)(uintptr_t)g_fake_main.base + 0x273ba0; gframe[7] = 1; gframe[8] = (uint64_t)(uintptr_t)objmem;
+    static uint64_t own[2] __attribute__((aligned(16))); own[0] = (uint64_t)(uintptr_t)gframe;   // the NVN entry's own frame record: its saved x29 is the game's frame
+    h_nvnCommandBufferBeginRecording(&d);
+    vislog_rec(&d, 36, (void *)(uintptr_t)((uint64_t)(uintptr_t)g_fake_main.base + 0x27ff80), own);
+    CHECK("the draw names its piece entry (object and index)", g_vl_nent == 1 && g_vl_ent[0].obj == (uint64_t)(uintptr_t)objmem && g_vl_ent[0].idx == 1);
+    vislog_rec(&d, 36, (void *)(uintptr_t)((uint64_t)(uintptr_t)g_fake_main.base + 0x27ff80), own);
+    CHECK("the same entry again is not listed twice", g_vl_nent == 1);
+    gframe[1] = (uint64_t)(uintptr_t)g_fake_main.base + 0x2734f0;   // another caller: not the piece entry setup
+    vislog_rec(&d, 36, (void *)(uintptr_t)((uint64_t)(uintptr_t)g_fake_main.base + 0x27ff80), own);
+    CHECK("a draw from another caller names no entry", g_vl_nent == 1);
+    CHECK("the entry is read back", dm_vislog_entries_dump("test at", 0) == 1);
+    draw(&d, 36);   // a real record, so the recording holds command memory (the calls above only exercised the hook)
+    h_nvnCommandBufferEndRecording(&d);
+    unsigned before = atomic_load(&g_vl_used_logs);
+    size_t used = h_nvnCommandBufferGetCommandMemoryUsed(&d); size_t ctl = h_nvnCommandBufferGetControlMemoryUsed(&d);
+    CHECK("both memory reads after that recording are logged", atomic_load(&g_vl_used_logs) == before + 2);
+    CHECK("its command memory used is not 0", used > 0);
+    (void)ctl;
+    h_nvnCommandBufferBeginRecording(&d); before = atomic_load(&g_vl_used_logs);
+    h_nvnCommandBufferGetCommandMemoryUsed(&d);
+    CHECK("after a new recording begins, reads are not about it", atomic_load(&g_vl_used_logs) == before);
+    h_nvnCommandBufferEndRecording(&d);
 
     // submit: each draw of the logged size met while the job is built
     NVNqueue q; NVNqueueBuilder qb = {0}; h_nvnQueueBuilderSetDefaults(&qb); h_nvnQueueInitialize(&q, &qb);
