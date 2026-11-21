@@ -1512,11 +1512,12 @@ static void census_dump(unsigned long long frame, const char *why) {
     for (int i = 0; i < m; i++) { o += snprintf(line + o, sizeof line - o, " %u:%u", v[i][0], v[i][1]); if (o > 3900 || i == m - 1) { MLOG("[census]%s", line); o = 0; } }
     memset(g_census, 0, sizeof g_census); g_census_lost = 0;
 }
+extern _Atomic uint64_t dm_vislog_recorded;   // hle_nvn.c: draws of the logged size as the game records them
 static void vislog_summary(unsigned long long frame, const char *why) {
     static uint64_t p_seen, p_drawn, p_rep, p_zero, p_cond, p_skip; static unsigned long long p_frame;
     uint64_t seen = atomic_load(&g_vislog_seen), drawn = atomic_load(&g_vislog_draws), rep = atomic_load(&g_vislog_reports), zero = atomic_load(&g_vislog_zero), cond = atomic_load(&g_vislog_cond), skip = atomic_load(&g_vislog_skips);
-    MLOG("[vislog] %s frame %llu: the %d-index mesh issued %llu times (%llu since frame %llu), encoded %llu (%llu), under a condition %llu (%llu; %llu unknown in all), dropped %llu (%llu); its queries reported %llu (%llu), 0 samples %llu (%llu); first issued at frame %llu, last at %llu",
-         why, frame, g_vislog, (unsigned long long)seen, (unsigned long long)(seen - p_seen), p_frame, (unsigned long long)drawn, (unsigned long long)(drawn - p_drawn), (unsigned long long)cond, (unsigned long long)(cond - p_cond),
+    MLOG("[vislog] %s frame %llu: the %d-index mesh recorded by the game %llu times; issued %llu times (%llu since frame %llu), encoded %llu (%llu), under a condition %llu (%llu; %llu unknown in all), dropped %llu (%llu); its queries reported %llu (%llu), 0 samples %llu (%llu); first issued at frame %llu, last at %llu",
+         why, frame, g_vislog, (unsigned long long)atomic_load(&dm_vislog_recorded), (unsigned long long)seen, (unsigned long long)(seen - p_seen), p_frame, (unsigned long long)drawn, (unsigned long long)(drawn - p_drawn), (unsigned long long)cond, (unsigned long long)(cond - p_cond),
          (unsigned long long)atomic_load(&g_vislog_cond_unknown), (unsigned long long)skip, (unsigned long long)(skip - p_skip), (unsigned long long)rep, (unsigned long long)(rep - p_rep), (unsigned long long)zero, (unsigned long long)(zero - p_zero),
          (unsigned long long)atomic_load(&g_vislog_first), (unsigned long long)atomic_load(&g_vislog_last));
     p_seen = seen; p_drawn = drawn; p_rep = rep; p_zero = zero; p_cond = cond; p_skip = skip; p_frame = frame;

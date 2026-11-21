@@ -1630,8 +1630,28 @@ NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, con
 NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int first, int n, const void *entries) { (void)c; (void)first; (void)n; (void)entries; }
 NVN_NOPROTO(nvnCommandBufferSetShadingRatePaletteMode, void, NVNcommandBuffer *c, int mode) { (void)c; (void)mode; }
 NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) { rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind}); }
+// DM_NVN_VISLOG=<index count> (diagnostic, kid-with-sword-remake L7.9): indexed draws of that size counted as the game records them (the replay counts them again in nvn_mtl.m,
+// so a draw lost between the two shows), the first three logged with the game's call site and the frame-pointer chain above it (the thunk is a tail jump: the return address is
+// the call site in the game), to find the code that decides whether a mod's piece (the Goku mod's body) is drawn
+_Atomic uint64_t dm_vislog_recorded;
+static void vislog_rec(int n, void *ra, void *fp) {
+    static int want = -1; if (want < 0) { const char *e = getenv("DM_NVN_VISLOG"); want = e ? atoi(e) : 0; }
+    if (!want || n != want) return;
+    uint64_t k = atomic_fetch_add(&dm_vislog_recorded, 1) + 1; if (k > 3) return;
+    char sl[1200]; int q = snprintf(sl, sizeof sl, "[vislog] recorded draw %llu of %d indices, called from", (unsigned long long)k, n);
+    uint64_t pc = (uint64_t)ra, f = 0; vm_size_t got = 0;
+    if (fp && !vm_read_overwrite(mach_task_self(), (vm_address_t)fp, 8, (vm_address_t)&f, &got) && got == 8) {}   // this function's saved x29: the game's frame (tail-jump thunk)
+    for (int d = 0; d < 12 && q < (int)sizeof sl - 60; d++) {
+        module_t *m = module_of((void *)pc);
+        q += m ? snprintf(sl + q, sizeof sl - q, " %s+%#llx", m->name, (unsigned long long)(pc - (uint64_t)m->base)) : snprintf(sl + q, sizeof sl - q, " %#llx", (unsigned long long)pc);
+        uint64_t rec[2]; if (!f || (f & 15) || vm_read_overwrite(mach_task_self(), (vm_address_t)f, 16, (vm_address_t)rec, &got) || got != 16) break;
+        pc = rec[1]; if (rec[0] <= f) break; f = rec[0];
+    }
+    LOG("%s", sl);
+}
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
+    vislog_rec(n, __builtin_return_address(0), __builtin_frame_address(0));
     rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, bi, inst, ib});
 }
 NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, int z) {
@@ -3646,8 +3666,8 @@ NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }
 
 // Draws
-NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, 0, 0, 1); }
-NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, bv, 0, 1); }
+NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { vislog_rec(n, __builtin_return_address(0), __builtin_frame_address(0)); rec_draw_idx(c, (p_draw_idx){pr, it, n, 0, 0, 1, ib}); }
+NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) { vislog_rec(n, __builtin_return_address(0), __builtin_frame_address(0)); rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, 0, 1, ib}); }
 NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n, int bi, int inst) {
     rec_draw(c, (p_draw){pr, first, n, inst, bi});
 }
