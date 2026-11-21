@@ -133,6 +133,7 @@ int main(void) {
     CHECK("with both rows holding a program it counts 0", vl_unit_dump((uint64_t)(uintptr_t)du, "test at", 0) == 0);
     du[0x5f] = 0;
     CHECK("a structure without a unit's layout is not taken for one", vl_unit_dump((uint64_t)(uintptr_t)du, "test at", 0) == -1);
+    CHECK("the queue element naming a unit is found", vl_unit_elements((uint64_t)(uintptr_t)unit, (uint64_t)(uintptr_t)&elem[0], (uint64_t)(uintptr_t)&elem[4], "test at", 0) == 1);
     draw(&d, 36);   // a real record, so the recording holds command memory (the calls above only exercised the hook)
     h_nvnCommandBufferEndRecording(&d);
     unsigned before = atomic_load(&g_vl_used_logs);
