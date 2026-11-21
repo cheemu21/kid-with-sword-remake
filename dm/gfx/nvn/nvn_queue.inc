@@ -220,6 +220,8 @@ static void nq_record_one(nq_job *j,const uint8_t *p,op_hdr h) {
     } else {
         nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
         size_t offset=n->length; nq_bytes(n,p,h.size); if(!n->bytes) die("queue commands: a record of %u bytes",h.size);
+        if(h.op==OP_DRAW_IDX && h.size>=8+12 && vislog_want()>0) { int32_t cnt; memcpy(&cnt,a+8,4);   // DM_NVN_VISLOG: p_draw_idx {prim, itype, count, ...}
+            if(cnt==vislog_want()) { uint64_t k=atomic_fetch_add(&dm_vislog_submitted,1)+1; if(k<=12) LOG("[vislog] submitted draw %llu of %d indices (job of frame %llu, now frame %llu)",(unsigned long long)k,cnt,(unsigned long long)j->frame,(unsigned long long)dm_nvn_frame_count()); } }
         if(h.op==OP_AS_BUILD) {
             if(h.size<8+sizeof(p_as_build))die("invalid acceleration-structure command size");
             nq_as_snapshot(j,(p_as_build *)(n->bytes+offset+8));
@@ -255,6 +257,8 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     j->objects.klen=16; j->frame=dm_nvn_frame_count(); j->submitted=guest_ns();
     // No scheduler lock while copying descriptors or resolving shader libraries.
     dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
+    if(vislog_want()>0) for(int i=0;i<count;i++) { uint32_t id=0,m=vl_handle(handles[i],&id); static _Atomic unsigned nlog;
+        if(m && atomic_fetch_add(&nlog,1)<12) LOG("[vislog] handle %#llx (recording %u, %u draws of %d indices) submitted at frame %llu",(unsigned long long)handles[i],id,m,vislog_want(),(unsigned long long)dm_nvn_frame_count()); }
     for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i]); nq_end(j);
     nq_cost_end(cost); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
     int waits=0; for(nq_node *node=j->first;node;node=node->next) waits|=node->kind==NQ_EVENT || node->kind==NQ_SYNC;
