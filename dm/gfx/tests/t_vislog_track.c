@@ -76,6 +76,19 @@ int main(void) {
     CHECK("a called handle's draws end with the recording that called it", ld(&dm_vislog_ended) == 4);
     CHECK("calling records no new draw", ld(&dm_vislog_recorded) == 3);
 
+    // CallCommands counted by call chain, with the calls of a handle holding a draw of the logged size
+    int sites = 0; uint64_t calls = 0, marked = 0;
+    for (int i = 0; i < VL_SITES; i++) if (g_vl_site[i].n) { sites++; calls += g_vl_site[i].n; marked += g_vl_site[i].marked; }
+    CHECK("the call is counted at its call chain, as a call of a marked handle", sites == 1 && calls == 1 && marked == 1);
+    NVNcommandBuffer d; h_nvnCommandBufferInitialize(&d, NULL); h_nvnCommandBufferAddCommandMemory(&d, &mp, 32 * 1024, 8 * 1024);
+    h_nvnCommandBufferBeginRecording(&d); h_nvnCommandBufferCallCommands(&d, 1, &hempty); h_nvnCommandBufferEndRecording(&d);
+    sites = 0; calls = 0; marked = 0;
+    for (int i = 0; i < VL_SITES; i++) if (g_vl_site[i].n) { sites++; calls += g_vl_site[i].n; marked += g_vl_site[i].marked; }
+    CHECK("a call from another place is another chain, of no marked handle", sites == 2 && calls == 2 && marked == 1);
+    dm_vislog_sites_dump("test at", 0);
+    sites = 0; for (int i = 0; i < VL_SITES; i++) if (g_vl_site[i].n) sites++;
+    CHECK("listing the chains starts a new count", sites == 0);
+
     // submit: each draw of the logged size met while the job is built
     NVNqueue q; NVNqueueBuilder qb = {0}; h_nvnQueueBuilderSetDefaults(&qb); h_nvnQueueInitialize(&q, &qb);
     h_nvnQueueSubmitCommands(&q, 1, &ha);

@@ -1261,15 +1261,71 @@ static int nvn_piece_record(const void *list, uint64_t v, const uint8_t *p, cons
 }
 // CallCommands: the called recording's pieces join the caller's list (its records run in place at submit: what its command memory holds then, nvn_piece_record; its control
 // memory may be given out again at once). It takes no command memory
-static void vl_called(const cmd_t *o, const void *cb, int n, const NVNcommandHandle *h, const char *how) {
+// The game's call chain at an NVN entry: the call site (the thunk is a tail jump, so the return address is in the game) and the frame-pointer chain above it; returns the frames
+// A frame record {x29, x30} at f: read directly inside this thread's stack (CallCommands runs thousands of times a frame), else through vm_read, which fails instead of faulting
+static int vl_rd16(uint64_t f, uint64_t rec[2]) {
+    static __thread uint64_t lo, hi;
+    if (!hi) { pthread_t t = pthread_self(); hi = (uint64_t)(uintptr_t)pthread_get_stackaddr_np(t); lo = hi - (uint64_t)pthread_get_stacksize_np(t); }
+    if (f >= lo && f <= hi - 16) { memcpy(rec, (const void *)(uintptr_t)f, 16); return 1; }
+    vm_size_t got = 0; return !vm_read_overwrite(mach_task_self(), (vm_address_t)f, 16, (vm_address_t)rec, &got) && got == 16;
+}
+static int vl_bt(void *ra, void *fp, uint64_t *pcs, int max) {
+    int d = 0; if (max <= 0) return 0; pcs[d++] = (uint64_t)ra;
+    if (!fp) return d;
+    uint64_t f = *(const uint64_t *)fp, rec[2];   // this function's own frame record: its saved x29 is the game's frame (tail-jump thunk)
+    while (d < max && f && !(f & 15) && vl_rd16(f, rec)) { pcs[d++] = rec[1]; if (rec[0] <= f) break; f = rec[0]; }
+    return d;
+}
+static int vl_pc_name(char *out, size_t n, uint64_t pc) {
+    module_t *m = module_of((void *)pc);
+    return m ? snprintf(out, n, "%s+%#llx", m->name, (unsigned long long)(pc - (uint64_t)m->base)) : snprintf(out, n, "%#llx", (unsigned long long)pc);
+}
+// DM_NVN_VISLOG: CallCommands / CopyCommands counted by the game's call chain (3 frames), with how many of those calls were of a handle holding a draw of the logged size; listed and
+// reset by dm_vislog_sites_dump (each 600 frames and at suspend), so the chain that calls a mod's piece on a launch where it shows can be compared with one where it does not
+enum { VL_SITES = 512, VL_DEPTH = 3 };
+static struct { uint64_t pc[VL_DEPTH]; uint64_t n, marked; } g_vl_site[VL_SITES]; static uint64_t g_vl_site_lost;
+static void vl_site_add(const uint64_t *pcs, int d, int marked) {
+    uint64_t k[VL_DEPTH] = {0}; for (int i = 0; i < d && i < VL_DEPTH; i++) k[i] = pcs[i];
+    unsigned h = (unsigned)(((k[0] ^ k[1] * 31 ^ k[2] * 131) * 0x9E3779B97F4A7C15ull) >> 55) & (VL_SITES - 1);
+    pthread_mutex_lock(&g_vl_mu);
+    for (int t = 0; t < VL_SITES; t++, h = (h + 1) & (VL_SITES - 1)) {
+        if (!g_vl_site[h].n) { memcpy(g_vl_site[h].pc, k, sizeof k); g_vl_site[h].n = 1; g_vl_site[h].marked = (uint64_t)marked; break; }
+        if (!memcmp(g_vl_site[h].pc, k, sizeof k)) { g_vl_site[h].n++; g_vl_site[h].marked += (uint64_t)marked; break; }
+        if (t == VL_SITES - 1) g_vl_site_lost++;
+    }
+    pthread_mutex_unlock(&g_vl_mu);
+}
+static int vl_site_cmp(const void *a, const void *b) { uint64_t x = ((const uint64_t *)a)[VL_DEPTH], y = ((const uint64_t *)b)[VL_DEPTH]; return x < y ? 1 : x > y ? -1 : 0; }
+void dm_vislog_sites_dump(const char *why, unsigned long long frame) {
     if (vislog_want() <= 0) return;
+    static uint64_t v[VL_SITES][VL_DEPTH + 2]; int m = 0; uint64_t lost;
+    pthread_mutex_lock(&g_vl_mu);
+    for (int i = 0; i < VL_SITES; i++) if (g_vl_site[i].n) { memcpy(v[m], g_vl_site[i].pc, sizeof g_vl_site[i].pc); v[m][VL_DEPTH] = g_vl_site[i].n; v[m][VL_DEPTH + 1] = g_vl_site[i].marked; m++; }
+    memset(g_vl_site, 0, sizeof g_vl_site); lost = g_vl_site_lost; g_vl_site_lost = 0;
+    pthread_mutex_unlock(&g_vl_mu);
+    qsort(v, m, sizeof v[0], vl_site_cmp);
+    LOG("[sites] %s frame %llu: %d call chains of CallCommands / CopyCommands since the last list (%llu lost)", why, frame, m, (unsigned long long)lost);
+    for (int i = 0; i < m && i < 60; i++) {
+        char line[400]; int q = 0; for (int k = 0; k < VL_DEPTH && v[i][k]; k++) { q += snprintf(line + q, sizeof line - q, k ? " < " : ""); q += vl_pc_name(line + q, sizeof line - q, v[i][k]); }
+        LOG("[sites]   %s: %llu calls, %llu of a handle holding a draw of %d indices", line, (unsigned long long)v[i][VL_DEPTH], (unsigned long long)v[i][VL_DEPTH + 1], vislog_want());
+    }
+}
+static void vl_called(const cmd_t *o, const void *cb, int n, const NVNcommandHandle *h, const char *how, void *ra, void *fp) {
+    if (vislog_want() <= 0) return;
+    uint64_t pcs[8]; int d = vl_bt(ra, fp, pcs, 8), marked = 0;
+    for (int i = 0; i < n; i++) if (vl_handle(h[i], NULL)) marked++;
+    vl_site_add(pcs, d, marked);
+    if (marked) { static _Atomic unsigned nbt; if (atomic_fetch_add(&nbt, 1) < 6) {
+        char line[900]; int q = snprintf(line, sizeof line, "[vislog] %s a handle holding a draw of %d indices from", how, vislog_want());
+        for (int k = 0; k < d && q < (int)sizeof line - 60; k++) { q += snprintf(line + q, sizeof line - q, " "); q += vl_pc_name(line + q, sizeof line - q, pcs[k]); }
+        LOG("%s", line); } }
     for (int i = 0; i < n; i++) { uint32_t id = 0, m = vl_handle(h[i], &id); if (!m) continue; vl_mark(o, cb, m);
         static _Atomic unsigned nlog; if (atomic_fetch_add(&nlog, 1) < 12) LOG("[vislog] handle %#llx (recording %u, %u draws of %d indices) %s into recording %u of command buffer %p at frame %llu", (unsigned long long)h[i], id, m, vislog_want(), how, o->rec_id, cb, (unsigned long long)dm_nvn_frame_count()); }
 }
 NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
     cmd_t *o = CB(c);
     if (!o->recording) { LOG("[RED] CallCommands outside a recording"); return; }
-    vl_called(o, c, n, h, "called");
+    vl_called(o, c, n, h, "called", __builtin_return_address(0), __builtin_frame_address(0));
     for (int i = 0; i < n; i++) {
         if (!ctl_handle_ok(h[i])) continue;
         ctl_chunk_close(o);
@@ -1281,7 +1337,7 @@ NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcom
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
     cmd_t *o = CB(c);
     if (!o->recording) { LOG("[RED] CopyCommands outside a recording"); return; }
-    vl_called(o, c, n, h, "copied");
+    vl_called(o, c, n, h, "copied", __builtin_return_address(0), __builtin_frame_address(0));
     for (int i = 0; i < n; i++) {
         if (!ctl_handle_ok(h[i])) continue;
         ctl_iter it = { (const uint8_t *)(uintptr_t)h[i], 0 }; uint64_t v; op_hdr r;

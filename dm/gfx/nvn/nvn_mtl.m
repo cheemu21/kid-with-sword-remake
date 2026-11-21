@@ -1512,6 +1512,7 @@ static void census_dump(unsigned long long frame, const char *why) {
     for (int i = 0; i < m; i++) { o += snprintf(line + o, sizeof line - o, " %u:%u", v[i][0], v[i][1]); if (o > 3900 || i == m - 1) { MLOG("[census]%s", line); o = 0; } }
     memset(g_census, 0, sizeof g_census); g_census_lost = 0;
 }
+void dm_vislog_sites_dump(const char *why, unsigned long long frame);   // hle_nvn.c: CallCommands / CopyCommands by call chain
 extern _Atomic uint64_t dm_vislog_recorded, dm_vislog_ended, dm_vislog_submitted, dm_vislog_restarted;   // hle_nvn.c: draws of the logged size at each stage from recording to submit
 static void vislog_summary(unsigned long long frame, const char *why) {
     static uint64_t p_seen, p_drawn, p_rep, p_zero, p_cond, p_skip; static unsigned long long p_frame;
@@ -1521,7 +1522,7 @@ static void vislog_summary(unsigned long long frame, const char *why) {
          (unsigned long long)atomic_load(&g_vislog_cond_unknown), (unsigned long long)skip, (unsigned long long)(skip - p_skip), (unsigned long long)rep, (unsigned long long)(rep - p_rep), (unsigned long long)zero, (unsigned long long)(zero - p_zero),
          (unsigned long long)atomic_load(&g_vislog_first), (unsigned long long)atomic_load(&g_vislog_last));
     p_seen = seen; p_drawn = drawn; p_rep = rep; p_zero = zero; p_cond = cond; p_skip = skip; p_frame = frame;
-    if (!(frame % 600) || why[0] == 's') census_dump(frame, why);
+    if (!(frame % 600) || why[0] == 's') { census_dump(frame, why); dm_vislog_sites_dump(why, frame); }
 }
 typedef struct { void *buf; uint32_t slot; } vis_slot;
 typedef struct { int n; vis_slot s[]; } vis_list;
