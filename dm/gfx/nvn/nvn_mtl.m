@@ -1498,6 +1498,20 @@ static void vislog_cond(int skipped, int indirect) {
 }
 // DM_NVN_VISLOG: every 150 frames and when graphics suspend, what happened to draws of the logged size, in all and since the last line: issued by the game (replay, before any
 // condition drops one), encoded, under a condition (unknown at replay: drawn), dropped, and the query reports around it
+// With DM_NVN_VISLOG every indexed draw the replay meets is counted by its index count (g_census, open addressing; a full table counts the rest as lost), and each summary at a
+// 600-frame mark or a suspend lists them, so the pieces drawn on a launch where a mod's piece is missing can be compared with one where it shows
+enum { CENSUS_N = 16384 }; static struct { uint32_t key, n; } g_census[CENSUS_N]; static uint64_t g_census_lost;
+static void census_add(uint32_t c) { if (!c) return; unsigned h = (c * 2654435761u) & (CENSUS_N - 1);
+    for (int k = 0; k < 64; k++, h = (h + 1) & (CENSUS_N - 1)) { if (g_census[h].key == c) { g_census[h].n++; return; } if (!g_census[h].key) { g_census[h].key = c; g_census[h].n = 1; return; } }
+    g_census_lost++; }
+static int census_cmp(const void *a, const void *b) { uint32_t x = ((const uint32_t *)a)[0], y = ((const uint32_t *)b)[0]; return x < y ? -1 : x > y; }
+static void census_dump(unsigned long long frame, const char *why) {
+    static uint32_t v[CENSUS_N][2]; int m = 0; for (int i = 0; i < CENSUS_N; i++) if (g_census[i].key) { v[m][0] = g_census[i].key; v[m][1] = g_census[i].n; m++; }
+    qsort(v, m, sizeof v[0], census_cmp); MLOG("[census] %s frame %llu: %d index counts drawn since the last list (%llu lost)", why, frame, m, (unsigned long long)g_census_lost);
+    char line[4096]; int o = 0;
+    for (int i = 0; i < m; i++) { o += snprintf(line + o, sizeof line - o, " %u:%u", v[i][0], v[i][1]); if (o > 3900 || i == m - 1) { MLOG("[census]%s", line); o = 0; } }
+    memset(g_census, 0, sizeof g_census); g_census_lost = 0;
+}
 static void vislog_summary(unsigned long long frame, const char *why) {
     static uint64_t p_seen, p_drawn, p_rep, p_zero, p_cond, p_skip; static unsigned long long p_frame;
     uint64_t seen = atomic_load(&g_vislog_seen), drawn = atomic_load(&g_vislog_draws), rep = atomic_load(&g_vislog_reports), zero = atomic_load(&g_vislog_zero), cond = atomic_load(&g_vislog_cond), skip = atomic_load(&g_vislog_skips);
@@ -1506,6 +1520,7 @@ static void vislog_summary(unsigned long long frame, const char *why) {
          (unsigned long long)atomic_load(&g_vislog_cond_unknown), (unsigned long long)skip, (unsigned long long)(skip - p_skip), (unsigned long long)rep, (unsigned long long)(rep - p_rep), (unsigned long long)zero, (unsigned long long)(zero - p_zero),
          (unsigned long long)atomic_load(&g_vislog_first), (unsigned long long)atomic_load(&g_vislog_last));
     p_seen = seen; p_drawn = drawn; p_rep = rep; p_zero = zero; p_cond = cond; p_skip = skip; p_frame = frame;
+    if (!(frame % 600) || why[0] == 's') census_dump(frame, why);
 }
 typedef struct { void *buf; uint32_t slot; } vis_slot;
 typedef struct { int n; vis_slot s[]; } vis_list;
@@ -17618,7 +17633,7 @@ void mtl_exec(const uint8_t *p) {
                 g_mdx_epoch++;
                 break;
             case OP_DRAW: { if (g_rc_skip) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
-            case OP_DRAW_IDX: { if (vislog_on()) { p_draw_idx lt; const p_draw_idx *ld = draw_idx_rec(a, h.size, &lt); if (ld->count == g_vislog) { uint64_t fr = atomic_load(&g_cur_frame); if (!atomic_fetch_add(&g_vislog_seen, 1)) atomic_store(&g_vislog_first, fr); atomic_store(&g_vislog_last, fr); vislog_cond(g_rc_skip, ld->ind != 0); } }
+            case OP_DRAW_IDX: { if (vislog_on()) { p_draw_idx lt; const p_draw_idx *ld = draw_idx_rec(a, h.size, &lt); census_add((uint32_t)ld->count); if (ld->count == g_vislog) { uint64_t fr = atomic_load(&g_cur_frame); if (!atomic_fetch_add(&g_vislog_seen, 1)) atomic_store(&g_vislog_first, fr); atomic_store(&g_vislog_last, fr); vislog_cond(g_rc_skip, ld->ind != 0); } }
                 if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);
