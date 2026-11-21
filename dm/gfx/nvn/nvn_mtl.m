@@ -1247,6 +1247,11 @@ typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(
 // GPU would at that point in the queue: Ocarina of Time reports its queries a submission ahead of the conditional draws, so every one has landed by then (1.48 million
 // conditions on its Kokiri Forest route, 42% false; the host drew them all, GPU p50 17.06 → 16.44 ms a frame on an M4 Pro). Inside a block evaluated false, draws and clears are dropped
 static int g_rc_skip;   // logical queue state: a render-enable block evaluated false is active
+// DM_NVN_RC_DRAW=1 (test, kid-with-sword-remake L7.9): a condition on report records never drops draws or clears (as before conditions were evaluated); SetRenderEnable(false)
+// still does. With DM_NVN_VISLOG the condition a draw of the logged size would have been dropped by is logged either way (g_rc_last: the last condition evaluated)
+static int rc_draw_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_RC_DRAW"); on = e && atoi(e) > 0; if (on) MLOG("DM_NVN_RC_DRAW=1: conditions on report records never drop draws (test)"); } return on; }
+static struct { int mode, known, would; uint64_t addr, x, y, mx[2], my[2]; int fx, fy; } g_rc_last = {.mode = -1};
+static _Atomic uint64_t g_vislog_skips, g_vislog_cond;
 // Latest command-ordered writer of each report counter. Completed reports are read
 // from memory, so CPU rewrites remain visible. Unfinished queries stay unknown;
 // timestamp counters and explicit writes can supply known bytes before completion.
@@ -1455,6 +1460,7 @@ static void rc_gpu_write(uint64_t dst, uint64_t n) {
 // count the GPU gave them (each 0, and 1 in 30 of the others), and the window report every 600 frames says how often that mesh was drawn: a mod's piece the game stops drawing
 // (the Goku mod's body, 20,598 indices) shows whether its query read 0 before it went
 static int g_vislog = -1, g_vislog_mark; static _Atomic uint64_t g_vislog_draws, g_vislog_reports, g_vislog_zero;
+static void vislog_cond(int skipped, int indirect);
 static int vislog_on(void) { if (g_vislog < 0) { const char *e = getenv("DM_NVN_VISLOG"); g_vislog = e ? atoi(e) : 0; if (g_vislog) MLOG("DM_NVN_VISLOG=%d: queries around draws of %d indices are logged", g_vislog, g_vislog); } return g_vislog; }
 static uint64_t g_vis_prov; static _Atomic int32_t g_vis_pend[4096];
 static unsigned vis_ph(uint64_t a) { return (unsigned)(((a >> 4) * 0x9E3779B97F4A7C15ull) >> 52); }
@@ -1477,6 +1483,18 @@ static void vis_report_done(uint64_t ad) {   // a report's answer written (post_
     if (!ad || (ad & 7)) return;
     _Atomic int32_t *c = &g_vis_pend[vis_ph(ad)]; int32_t v = atomic_load_explicit(c, memory_order_relaxed);
     while (v > 0 && !atomic_compare_exchange_weak_explicit(c, &v, v - 1, memory_order_acq_rel, memory_order_relaxed)) {}
+}
+// DM_NVN_VISLOG: a draw of the logged size under a condition on report records: whether the condition dropped it (or, with DM_NVN_RC_DRAW, would have), and what the two records held
+static _Atomic uint64_t g_cur_frame;
+static void vislog_cond(int skipped, int indirect) {
+    if (g_rc_last.mode < 0) return;
+    uint64_t n = atomic_fetch_add(&g_vislog_cond, 1) + 1; if (!g_rc_last.would) return;
+    uint64_t k = atomic_fetch_add(&g_vislog_skips, 1) + 1;
+    if (k <= 12 || !(k & (k - 1)))
+        MLOG("[vislog] frame %llu: a %d-index draw%s %s by a condition (%s, records %#llx / +16: values %llu / %llu; memory %llu,%llu / %llu,%llu; flags %#x / %#x; %llu of %llu conditional draws of it)",
+             (unsigned long long)atomic_load(&g_cur_frame), g_vislog, indirect ? " (indirect)" : "", skipped ? "dropped" : "kept (DM_NVN_RC_DRAW)", g_rc_last.mode ? "draw if not equal" : "draw if equal",
+             (unsigned long long)g_rc_last.addr, (unsigned long long)g_rc_last.x, (unsigned long long)g_rc_last.y, (unsigned long long)g_rc_last.mx[0], (unsigned long long)g_rc_last.mx[1],
+             (unsigned long long)g_rc_last.my[0], (unsigned long long)g_rc_last.my[1], g_rc_last.fx, g_rc_last.fy, (unsigned long long)k, (unsigned long long)n);
 }
 typedef struct { void *buf; uint32_t slot; } vis_slot;
 typedef struct { int n; vis_slot s[]; } vis_list;
@@ -5427,7 +5445,7 @@ void mtl_preread(const void *mem, uint64_t size) {
     });
 }
 static void preread_report(unsigned long long frame) {
-    if (g_vislog > 0) MLOG("[vislog] up to frame %llu: the %d-index mesh drawn %llu times, its queries reported %llu times, %llu of them 0", frame, g_vislog, (unsigned long long)atomic_load(&g_vislog_draws), (unsigned long long)atomic_load(&g_vislog_reports), (unsigned long long)atomic_load(&g_vislog_zero));
+    if (g_vislog > 0) MLOG("[vislog] up to frame %llu: the %d-index mesh drawn %llu times, its queries reported %llu times, %llu of them 0; %llu of its draws under a condition, %llu of those false", frame, g_vislog, (unsigned long long)atomic_load(&g_vislog_draws), (unsigned long long)atomic_load(&g_vislog_reports), (unsigned long long)atomic_load(&g_vislog_zero), (unsigned long long)atomic_load(&g_vislog_cond), (unsigned long long)atomic_load(&g_vislog_skips));
     if (atomic_load(&g_trickle_n)) MLOG("[trickle] up to frame %llu: %llu pools, %.0f MB put into the residency set ahead of the raw memory table", frame, (unsigned long long)atomic_load(&g_trickle_n), atomic_load(&g_trickle_bytes) / 1048576.0);
     if (g_preread <= 0) return;
     MLOG("[preread] up to frame %llu: %llu ranges, %.0f MB asked to be read ahead, %.1f ms in the calls, %llu failed (range gone), %llu skipped (asked within 2 s)", frame, (unsigned long long)atomic_load(&g_preread_n),
@@ -8356,7 +8374,7 @@ static void prog_resolve(void) {
 }
 static int g_state_inited;
 static void state_reset(void) {
-    g_rc_skip=0;
+    g_rc_skip=0; g_rc_last.mode = -1;
     g_state_inited = 1;
     memset(&S, 0, sizeof S);
     g_pso_dirty = g_dss_dirty = 1;
@@ -17496,9 +17514,14 @@ void mtl_exec(const uint8_t *p) {
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
             case OP_RENDER_COND: { const p_render_cond *rc = a;   // SetRenderEnable / SetRenderEnableConditional (hle_nvn.c)
-                if (rc->mode >= 2) { g_rc_skip = rc->mode == 3; PD("E %llu render enable %d", g_stat_pass, rc->mode == 2); }
+                if (rc->mode >= 2) { g_rc_skip = rc->mode == 3; g_rc_last.would = 0; g_rc_last.mode = -1; PD("E %llu render enable %d", g_stat_pass, rc->mode == 2); }
                 else { uint64_t x = 0, y = 0; int known = rc_value(rc->addr, &x) & rc_value(rc->addr + 16, &y);
                     g_rc_skip = known && (rc->mode ? x == y : x != y);
+                    if (vislog_on()) { g_rc_last.mode = rc->mode; g_rc_last.known = known; g_rc_last.would = g_rc_skip; g_rc_last.addr = rc->addr; g_rc_last.x = x; g_rc_last.y = y;
+                        for (int k = 0; k < 2; k++) { uint64_t ra = rc->addr + 16 * k; rc_report *rr = rc_find(ra); uint64_t *m = k ? g_rc_last.my : g_rc_last.mx;
+                            m[0] = *(const volatile uint64_t *)ra; m[1] = *(const volatile uint64_t *)(ra + 8);
+                            (k ? &g_rc_last.fy : &g_rc_last.fx)[0] = rr ? 1 | rr->reported << 1 | rr->conservative << 2 | rr->readable << 3 | rr->gpu_domain << 4 | rr->unreliable << 5 | (rr->known == 255) << 6 | rr->dirty << 7 | (rr->fence > atomic_load(&g_rc_complete)) << 8 : 0; } }
+                    if (g_rc_skip && rc_draw_on()) g_rc_skip = 0;
                     PD("E %llu conditional render %s addr=%#llx values %llu / %llu%s%s", g_stat_pass, rc->mode ? "draw if not equal" : "draw if equal", (unsigned long long)rc->addr, (unsigned long long)x, (unsigned long long)y, known ? "" : " (unknown, drawn)", g_rc_skip ? " → not drawn" : ""); }
                 break; }
             case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_fence + 1; s->fenced = 1;   // the fence value this submission (segment) commits with
@@ -17584,7 +17607,8 @@ void mtl_exec(const uint8_t *p) {
                 g_mdx_epoch++;
                 break;
             case OP_DRAW: { if (g_rc_skip) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
-            case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
+            case OP_DRAW_IDX: { if (vislog_on()) { p_draw_idx lt; const p_draw_idx *ld = draw_idx_rec(a, h.size, &lt); if (ld->count == g_vislog) vislog_cond(g_rc_skip, ld->ind != 0); }
+                if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);
                 if (passdump()) { NvProg *pr = S.prog ? prog_get(S.prog) : nil;
