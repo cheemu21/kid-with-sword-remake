@@ -1070,6 +1070,16 @@ class IpaFallback(unittest.TestCase):
         self.assertIn('app=[applegpu_g18p.mtl4x prebuilt.tsv ]', out)   # no .mtl4a in the app, the stamp beside it
         self.assertIn('made=[ cf fa ed fe ]', out)   # the archive the build made keeps its magic: the app's file is a clone
 
+    def test_native_archive_is_packed_directly(self):
+        made = ('mkdir -p "$W/build/ios/pso/bundle"; printf "\\317\\372\\355\\376rest" > "$W/original"; '
+                'cp "$W/original" "$W/build/ios/pso/bundle/applegpu_g18p.mtl4a"; '
+                'echo stamp > "$W/build/ios/pso/bundle/prebuilt.tsv"')
+        check = ('cmp "$W/original" "$PSO/applegpu_g18p.mtl4a" && '
+                 'test -f "$PSO/prebuilt.tsv" && test ! -e "$PSO/applegpu_g18p.mtl4x" && echo native-ok')
+        out = self.step(made, after=check, DM_PSO_ARCHIVE_FORMAT='native')
+        self.assertIn('/build/ios/pso/bundle]', out)
+        self.assertIn('native-ok', out)
+
     def test_current_per_game_host_is_discovered_without_the_old_stamp(self):
         out = self.step('echo "ARGS $*"; exit 0\n', host_game='G')
         self.assertIn('/dm/host/gen/G/dmhost', out); self.assertIn('GAME=G gen/G/dmhost', out)

@@ -170,7 +170,9 @@ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/sha
   # LiveContainer signs every Mach-O it finds in an app it installs, and a pipeline archive is one (a 64-bit GPU executable): its signer failed on the 2.6 GB applegpu_g19p.mtl4a
   # ("Failed to Sign …/pso/applegpu_g19p.mtl4a") and the install stopped. The app carries each archive as <gpu>.mtl4x, a clone (cp -c: no extra disk) whose first 4 bytes read
   # DMPA instead of the Mach-O magic, so no signer takes it for code; the host clones it back into Documents/pso_bundle with the magic restored (nvn_mtl.m pso_bundle_unwrap)
-  if [ -n "${PSO:-}" ] && [ -d "$PSO" ]; then
+  if [ -d "$PSO" ] && [ "${DM_PSO_ARCHIVE_FORMAT:-wrapped}" = native ]; then
+    t "packing native pipeline archives from $PSO (.mtl4a opens directly in the app bundle)"
+  elif [ -n "${PSO:-}" ] && [ -d "$PSO" ]; then
     PA=$W/build/ios/pso/app; rm -rf "$PA"; mkdir -p "$PA" || die "mkdir $PA"
     for f in "$PSO"/*; do
       [ -e "$f" ] || continue   # an empty folder: the glob stays as written
