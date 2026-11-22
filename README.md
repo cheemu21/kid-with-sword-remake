@@ -131,7 +131,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/OcarinaOfTime --romfs separate --e
 
 The app gets the port's icon (`dm/games/0400486024DEC000/icon.png`), as a dump folder has none of its own. To use another picture, add `--icon <image>` (any JPEG or PNG).
 
-The IPA appears in the game's folder. The first build compiles about 43,000 shaders and takes one to two hours; building again reuses them and takes minutes.
+The IPA appears in the game's folder. For a direct install with iLoader, add `--pso-archive native` to let Metal open the pipeline archive directly from the app bundle. For LiveContainer, keep the default wrapped archive. The first build compiles about 43,000 shaders and takes one to two hours; building again reuses them and takes minutes.
 
 ### Build settings
 
