@@ -49,7 +49,7 @@ static uint64_t ld(_Atomic uint64_t *v) { return atomic_load(v); }
 static void draw(NVNcommandBuffer *c, int n) { h_nvnCommandBufferDrawElements(c, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, n, 0x10000); }
 
 int main(void) {
-    setenv("DM_NVN_VISLOG", "36", 1);
+    setenv("DM_NVN_VISLOG", "36", 1); setenv("DM_NVN_NANFIX", "0.5", 1);
     static uint8_t mem[64 * 1024] __attribute__((aligned(4096)));
     NVNmemoryPoolBuilder mb; NVNmemoryPool mp;
     h_nvnMemoryPoolBuilderSetDefaults(&mb); h_nvnMemoryPoolBuilderSetStorage(&mb, mem, sizeof mem);
@@ -110,7 +110,10 @@ int main(void) {
     CHECK("the entry is read back", dm_vislog_entries_dump("test at", 0) == 1);
     // the render queue's unit pointing at the entry's object (+0x68), and an element pointing at the unit (+0x10)
     static uint64_t unit[16] __attribute__((aligned(16))), elem[4] __attribute__((aligned(16)));
+    static uint64_t unit_prog[2] __attribute__((aligned(16))) = {0x5000, 0};   // the unit's program table: one 16-byte row holding a program
     unit[0x68 / 8] = (uint64_t)(uintptr_t)objmem; unit[0x54 / 8] = 0x1234; elem[2] = (uint64_t)(uintptr_t)unit;
+    ((uint8_t *)unit)[0x5f] = 16; unit[0x60 / 8] = (uint64_t)(uintptr_t)unit_prog; memset((uint8_t *)unit + 0x3b, 0xff, 16); ((uint8_t *)unit)[0x3b] = 0;   // a draw unit's layout
+    uint32_t qnan = 0x7fc00000u; memcpy(elem, &qnan, 4);   // the structure naming the unit holds a quiet NaN at +0
     uint64_t hits[16]; int nh = vl_scan_refs((uint64_t)(uintptr_t)objmem, (uint64_t)(uintptr_t)objmem - (8u << 20), (uint64_t)(uintptr_t)objmem + (8u << 20), hits, 16), found = 0;
     for (int i = 0; i < nh; i++) if (hits[i] == (uint64_t)(uintptr_t)&unit[0x68 / 8]) found = 1;
     CHECK("the scan finds the unit's pointer to the object", found);
@@ -118,7 +121,17 @@ int main(void) {
     for (int i = 0; i < nh; i++) if (hits[i] == (uint64_t)(uintptr_t)&elem[2]) found = 1;
     CHECK("the scan finds the element's pointer to the unit", found);
     CHECK("an unmapped range is skipped, not read", vl_scan_refs(1, 0x1000, 0x200000, hits, 16) == 0);
-    CHECK("the dump lists at least that unit", dm_vislog_units_dump("test at", 0) >= 1);
+    g_vl_lo = (uint64_t)(uintptr_t)objmem - (8u << 20); g_vl_hi = (uint64_t)(uintptr_t)objmem + (8u << 20); g_vl_scan_delay = 0;   // the scan over this test's memory, at once
+    CHECK("a suspend does not scan", dm_vislog_units_dump("suspend at", 0) == 0 && g_vl_nunit < 0);
+    CHECK("the scan keeps the draw unit", dm_vislog_units_dump("test at", 0) >= 1);
+    int kept = 0; for (int k = 0; k < g_vl_nunit; k++) if (g_vl_unit[k].u == (uint64_t)(uintptr_t)unit) for (int e = 0; e < g_vl_unit[k].nref; e++) kept |= g_vl_unit[k].ref[e] == (uint64_t)(uintptr_t)elem;
+    CHECK("and the structure naming it", kept);
+    float fv; memcpy(&fv, elem, 4);
+    CHECK("DM_NVN_NANFIX replaced the NaN there", fv == 0.5f);
+    fv = 2.0f; memcpy(elem, &fv, 4); dm_vislog_units_dump("test at", 150); memcpy(&fv, elem, 4);
+    CHECK("a value that is not the NaN stays as it is", fv == 2.0f);
+    unsigned long long before_scan = g_vl_last_scan; dm_vislog_units_dump("test at", 300);
+    CHECK("later summaries re-read what the scan found, without scanning again", g_vl_last_scan == before_scan);
     nh = vl_scan_refs((uint64_t)(uintptr_t)unit, (uint64_t)(uintptr_t)&elem[0], (uint64_t)(uintptr_t)&elem[4], hits, 16);
     CHECK("a range smaller than a page, not on a chunk boundary, is still scanned", nh == 1 && hits[0] == (uint64_t)(uintptr_t)&elem[2]);
     nh = vl_scan_all((uint64_t)(uintptr_t)objmem, (uint64_t)(uintptr_t)objmem - (8u << 20), (uint64_t)(uintptr_t)objmem + (8u << 20), hits, 16); found = 0;
@@ -133,7 +146,6 @@ int main(void) {
     CHECK("with both rows holding a program it counts 0", vl_unit_dump((uint64_t)(uintptr_t)du, "test at", 0) == 0);
     du[0x5f] = 0;
     CHECK("a structure without a unit's layout is not taken for one", vl_unit_dump((uint64_t)(uintptr_t)du, "test at", 0) == -1);
-    CHECK("the queue element naming a unit is found", vl_unit_elements((uint64_t)(uintptr_t)unit, (uint64_t)(uintptr_t)&elem[0], (uint64_t)(uintptr_t)&elem[4], "test at", 0) == 1);
     draw(&d, 36);   // a real record, so the recording holds command memory (the calls above only exercised the hook)
     h_nvnCommandBufferEndRecording(&d);
     unsigned before = atomic_load(&g_vl_used_logs);

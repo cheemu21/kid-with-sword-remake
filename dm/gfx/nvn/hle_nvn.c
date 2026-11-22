@@ -1216,7 +1216,7 @@ static uint32_t vl_handle(uint64_t handle, uint32_t *rec_id) {   // the marked d
 // (the object) at x29+0x40, so the draw's first game frame names the entry; dm_vislog_entries_dump reads it back each summary, on launches where the piece shows and where not
 enum { VL_ENTS = 8, VL_ENT_RA = 0x273ba0, VL_ENT_ARRAY = 0x638, VL_ENT_SIZE = 0x270, VL_ENT_COUNT = 0x69c };
 typedef struct { uint64_t obj, idx; uint32_t rec_id; } vl_ent;
-static vl_ent g_vl_ent[VL_ENTS]; static int g_vl_nent;
+static vl_ent g_vl_ent[VL_ENTS]; static int g_vl_nent; static uint64_t g_vl_ent_frame;   // the frame the first entry was noted
 static int vl_rd16(uint64_t f, uint64_t rec[2]);
 static int vl_pc_name(char *out, size_t n, uint64_t pc);
 static int vl_rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a && !vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) && got == n; }
@@ -1228,7 +1228,7 @@ static void vl_entry_note(void *fp, uint32_t rec_id) {
     if (!m || strcmp(m->name, "main") || rec[1] - (uint64_t)(uintptr_t)m->base != VL_ENT_RA || !vl_rd16(f + 0x38, sv)) return;
     pthread_mutex_lock(&g_vl_mu);
     int i = 0; while (i < g_vl_nent && !(g_vl_ent[i].obj == sv[1] && g_vl_ent[i].idx == sv[0])) i++;
-    if (i == g_vl_nent && g_vl_nent < VL_ENTS) { g_vl_ent[i].obj = sv[1]; g_vl_ent[i].idx = sv[0]; g_vl_nent++; }
+    if (i == g_vl_nent && g_vl_nent < VL_ENTS) { if (!g_vl_nent) g_vl_ent_frame = dm_nvn_frame_count(); g_vl_ent[i].obj = sv[1]; g_vl_ent[i].idx = sv[0]; g_vl_nent++; }
     if (i < VL_ENTS) g_vl_ent[i].rec_id = rec_id;
     pthread_mutex_unlock(&g_vl_mu);
 }
@@ -1287,43 +1287,50 @@ static int vl_unit_dump(uint64_t u, const char *why, unsigned long long frame) {
             (unsigned long long)w[r], (unsigned long long)w[r+1], (unsigned long long)w[r+2], (unsigned long long)w[r+3], (unsigned long long)w[r+4], (unsigned long long)w[r+5], (unsigned long long)w[r+6], (unsigned long long)w[r+7]);
     return nulls;
 }
-// The render queue elements naming a draw unit at +0x10 (main+0x6d71c) in [lo, hi): logged with their first 0x30 bytes; returns the words found
-static int vl_unit_elements(uint64_t u, uint64_t lo, uint64_t hi, const char *why, unsigned long long frame) {
-    uint64_t el[32]; int ne = vl_scan_all(u, lo, hi, el, 32);
-    LOG("[vislog] %s frame %llu: %d words pointing at draw unit %#llx", why, frame, ne, (unsigned long long)u);
-    for (int e = 0; e < ne; e++) { uint64_t x[8]; if (el[e] < 0x10 || !vl_rd(el[e] - 0x10, x, sizeof x)) continue;
-        char line[400]; int q = snprintf(line, sizeof line, "[vislog]   at %#llx (if a queue element, +0x10):", (unsigned long long)el[e]);
-        for (int k = 0; k < 8; k++) q += snprintf(line + q, sizeof line - q, " %016llx", (unsigned long long)x[k]);
-        float f0; memcpy(&f0, x, 4); snprintf(line + q, sizeof line - q, " (+0 as a float %g)", (double)f0);
-        LOG("%s", line); }
-    return ne;
+// DM_NVN_VISLOG (Ocarina of Time): the render queue reaches a piece entry through a draw unit whose +0x68 is the piece object (main+0x6d8c4). One scan of the guest range finds the
+// units naming a logged entry's object and the structures naming each unit at +0x10, g_vl_scan_delay frames after the entry was noted (a scan takes 2-3 s on an iPhone, and run
+// during the world's load it could shift the very timing under test), never at a suspend; the summaries after it re-read what it found. On a launch where the Goku body is not
+// drawn, the structure 0x1bb0 below its unit holds a quiet NaN (0x7fc00000) at +0 (test 19/20). DM_NVN_NANFIX=<value> (test) writes that value there while it holds that NaN
+enum { VL_UNITS = 4, VL_REFS = 8 };
+static struct { uint64_t u, ref[VL_REFS]; int nref; } g_vl_unit[VL_UNITS]; static int g_vl_nunit = -1;   // -1: not scanned yet
+static uint64_t g_vl_lo = 0x7000000000ull, g_vl_hi = 0x7800000000ull; static unsigned g_vl_scan_delay = 300;   // the guest range and the wait before the scan (unit tests change them)
+static unsigned long long g_vl_last_scan; static _Atomic unsigned g_vl_nanfix_logs;
+static int vl_nanfix(float *v) {
+    static int on = -1; static float val;
+    if (on < 0) { const char *e = getenv("DM_NVN_NANFIX"); on = e && *e; if (on) { val = strtof(e, NULL); LOG("[vislog] DM_NVN_NANFIX=%g: a NaN at +0 of a structure naming the logged piece's draw unit is replaced (test)", (double)val); } }
+    if (on) *v = val; return on;
 }
-// DM_NVN_VISLOG (Ocarina of Time): the render queue reaches a piece entry through a draw unit whose +0x68 is the piece object (main+0x6d8c4) and a queue element whose +0x10 is the
-// unit (main+0x6d71c). The units pointing at a logged entry's object, and elements pointing at those, are found in the 64 MB around the object and dumped (the first 0x80 /
-// 0x20 bytes), so the unit of a piece the game draws can be compared with the unit of one it skips
-int dm_vislog_units_dump(const char *why, unsigned long long frame) {   // returns the units found
-    if (vislog_want() <= 0) return 0;
-    pthread_mutex_lock(&g_vl_mu); uint64_t obj = g_vl_nent ? g_vl_ent[0].obj : 0; pthread_mutex_unlock(&g_vl_mu);
-    if (!obj) return 0;
-    uint64_t lo = obj > (64ull << 20) ? obj - (64ull << 20) : 0, hi = obj + (64ull << 20), hits[16], el[8]; int n = vl_scan_refs(obj, lo, hi, hits, 16), units = 0;
-    LOG("[vislog] %s frame %llu: %d words pointing at object %#llx in the 128 MB around it", why, frame, n, (unsigned long long)obj);
-    if (why[0] != 's') { uint64_t all[64], t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); int na = vl_scan_all(obj, 0x7000000000ull, 0x7800000000ull, all, 64), nu = 0;   // every draw unit naming the object at +0x68, wherever it is (not at a suspend: the app is going to the background)
-      for (int i = 0; i < na; i++) {
-          if (all[i] < 0x68 || vl_unit_dump(all[i] - 0x68, why, frame) < 0) continue;
-          nu++; vl_unit_elements(all[i] - 0x68, 0x7000000000ull, 0x7800000000ull, why, frame);
-      }
-      LOG("[vislog] %s frame %llu: %d words pointing at the object in the guest range, %d of them at +0x68 of a draw unit (%.0f ms in all)", why, frame, na, nu, (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6); }
-    for (int i = 0; i < n; i++) {
-        if (hits[i] < 0x68) continue;
-        uint64_t u = hits[i] - 0x68, w[16]; if (!vl_rd(u, w, sizeof w)) continue; units++;
-        char line[600]; int q = snprintf(line, sizeof line, "[vislog]   if a unit at %#llx (pointer at +0x68):", (unsigned long long)u);
-        for (int k = 0; k < 16; k++) q += snprintf(line + q, sizeof line - q, " %016llx", (unsigned long long)w[k]);
-        LOG("%s", line);
-        int ne = vl_scan_refs(u, lo, hi, el, 8);
-        for (int e = 0; e < ne; e++) { uint64_t x[4]; if (el[e] < 0x10 || !vl_rd(el[e] - 0x10, x, sizeof x)) continue;
-            LOG("[vislog]     pointed at from %#llx (if an element, +0x10): %016llx %016llx %016llx %016llx", (unsigned long long)el[e], (unsigned long long)x[0], (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[3]); }
+static void vl_ref_dump(uint64_t u, uint64_t r, const char *why, unsigned long long frame) {
+    uint64_t x[8]; if (!vl_rd(r, x, sizeof x)) { LOG("[vislog] %s frame %llu:   structure %#llx no longer readable", why, frame, (unsigned long long)r); return; }
+    float f0; memcpy(&f0, x, 4); uint32_t w0 = (uint32_t)x[0]; float fix;
+    char line[400]; int q = snprintf(line, sizeof line, "[vislog] %s frame %llu:   structure %#llx (+0x10 %s the unit):", why, frame, (unsigned long long)r, x[2] == u ? "names" : "no longer names");
+    for (int k = 0; k < 8; k++) q += snprintf(line + q, sizeof line - q, " %016llx", (unsigned long long)x[k]);
+    snprintf(line + q, sizeof line - q, " (+0 as a float %g)", (double)f0); LOG("%s", line);
+    if (x[2] == u && w0 == 0x7fc00000u && vl_nanfix(&fix)) {
+        dm_guest_write_prepare((void *)(uintptr_t)r, 4); memcpy((void *)(uintptr_t)r, &fix, 4);
+        if (atomic_fetch_add(&g_vl_nanfix_logs, 1) < 16) LOG("[vislog] %s frame %llu: DM_NVN_NANFIX wrote %g over the NaN at %#llx", why, frame, (double)fix, (unsigned long long)r);
     }
-    return units;
+}
+int dm_vislog_units_dump(const char *why, unsigned long long frame) {   // returns the units known
+    if (vislog_want() <= 0) return 0;
+    pthread_mutex_lock(&g_vl_mu); uint64_t obj = g_vl_nent ? g_vl_ent[0].obj : 0, f0 = g_vl_ent_frame; pthread_mutex_unlock(&g_vl_mu);
+    if (!obj) return 0;
+    if ((g_vl_nunit < 0 || (g_vl_nunit == 0 && frame - g_vl_last_scan >= 900)) && why[0] != 's' && frame >= f0 + g_vl_scan_delay) {
+        uint64_t all[64], t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); int na = vl_scan_all(obj, g_vl_lo, g_vl_hi, all, 64); g_vl_nunit = 0; g_vl_last_scan = frame;
+        for (int i = 0; i < na && g_vl_nunit < VL_UNITS; i++) {
+            if (all[i] < 0x68 || vl_unit_dump(all[i] - 0x68, why, frame) < 0) continue;
+            uint64_t u = all[i] - 0x68, el[32]; int ne = vl_scan_all(u, g_vl_lo, g_vl_hi, el, 32), k = g_vl_nunit++;
+            g_vl_unit[k].u = u; g_vl_unit[k].nref = 0;
+            for (int e = 0; e < ne && g_vl_unit[k].nref < VL_REFS; e++) if (el[e] >= 0x10) g_vl_unit[k].ref[g_vl_unit[k].nref++] = el[e] - 0x10;
+        }
+        LOG("[vislog] %s frame %llu: %d words pointing at object %#llx in the guest range, %d draw units kept with their structures (%.0f ms)", why, frame, na, (unsigned long long)obj, g_vl_nunit,
+            (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+    }
+    for (int k = 0; k < (g_vl_nunit > 0 ? g_vl_nunit : 0); k++) {
+        if (!(frame % 600)) vl_unit_dump(g_vl_unit[k].u, why, frame);
+        for (int e = 0; e < g_vl_unit[k].nref; e++) vl_ref_dump(g_vl_unit[k].u, g_vl_unit[k].ref[e], why, frame);
+    }
+    return g_vl_nunit > 0 ? g_vl_nunit : 0;
 }
 int dm_vislog_entries_dump(const char *why, unsigned long long frame) {   // returns the entries read
     if (vislog_want() <= 0) return 0;
