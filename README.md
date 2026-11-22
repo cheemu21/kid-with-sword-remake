@@ -32,20 +32,33 @@
 > [!NOTE]
 > **Not an emulator.** The game's own code runs directly on the Apple chip, with its graphics rebuilt on Metal. Nothing from the game is in this repository or in any release: you build the app yourself from your own copy of the game. Not affiliated with Nintendo.
 
-## Latest: L7.6
+## Latest: L8.1
 
-**Mods.** The launcher now has a **Mods** button under Play, beside All Settings. Import a mod as a **.zip** or a folder from the Files app; each mod has its own switch, you can drag them into order, and the app makes room for bigger files in the game's size table. Usual Switch romfs mods work, amiibo keep working, and with no mod on the game starts exactly as before. Tested with a Goku character mod on an iPhone 18 Pro. How to use it: [Mods](docs/playing.md#mods).
+L8 is about **smooth, steady play on more iPhones**, a fix for modded characters, and an ocarina microphone you can actually use. Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for older builds.
 
-L7 moves the port onto the newest nxnative engine and aims at one thing: **stable, steady play on more iPhones, with the app staying under 5 GB of memory.** Every release is source code only. See [Releases](https://github.com/cheemu21/kid-with-sword-remake/releases) for older builds.
+**Mods**
 
-**New since L6:**
+- **Modded Link models no longer go invisible.** A mod's piece of Link that the game set up too early in a session (loading a save within about 20 seconds of starting) was never drawn, which is why the Goku mod vanished on some launches. With a mod on, the game now ignores input for its first 20–25 seconds and shows a **"Getting your mods ready…"** countdown, so a save always loads after that point. With no mod on there is no wait.
 
-- **Texture Memory Saver** (on by default on iPhone): the two finest detail levels of the game's large textures are left out, which costs little on a phone screen and brings the peak from about 5.2 GB to under 5 GB on an iPhone 18 Pro.
-- **No memory spikes at area loads**: texture uploads go to the GPU in batches of at most 48 MB.
-- **Lighter frame generation**: the in-between frames are made at 0.6 of the picture's size, about 2 ms of GPU time, so 30 fps with frame generation drops far fewer frames.
-- **Render Scale down to 0.25**, labelled **Ultra Potato Mode 🥔**, for older phones.
-- **The Mac app** with the same launcher as the iPhone, and a **simpler iPhone launcher** that only shows the settings that help a phone. The Performance HUD and the launcher picture are back.
-- **Better freeze reports** (L7.5): if the picture stops for 5 seconds, `log.txt` now says which thread holds things up and where, so a freeze at a world change can be tracked down from one log.
+**Ocarina microphone**
+
+- **Mic Sensitivity is a 0–100 % slider** (60 % is the old Normal, 90 % the old High).
+- **Test Microphone** (All Settings → Controls): live meters for your microphone and for what the game hears, a light when the game would take it as a note, your pitch and the nearest ocarina note, and the slider applied live.
+
+**Smoother play**
+
+- **No CPU stalls from memory the game writes all the time** (nxnative PR #3180): a page the game kept writing could make its threads fault over and over, costing frames and, in Castle Town, stopping them.
+- **Saving the shader archive no longer stalls a frame** that needs a new pipeline (upstream).
+- **Game data is read ahead in the background** when the game sets it up (L7.7): long pauses at area loads went from 9 to 1 in a test run.
+- **Memory is made GPU-ready a little each frame** instead of all at once at an area change (L7.8).
+
+**Memory and stability**
+
+- **Memory pressure mode** (L8.1): when the app nears 4.6 GB, or iOS leaves it less than 3 GB, unused graphics memory is given back sooner, so iOS does not start swapping the game out (the cause of stutter late in a long session).
+- **Texture memory is released reliably again** (L8.1): an upstream change made freed texture heaps go only some of the time in this port; it is off by default (`DM_NVN_RES_PLACED_PARENT=1` turns it on).
+- Background shader builds and unused thread stacks give their memory back, upload staging no longer waits on residency commits, and more upstream fixes from nxnative.
+
+**Since L6** (the L7 line): the newest nxnative engine, the Texture Memory Saver (under 5 GB on iPhone), texture uploads in 48 MB batches, lighter frame generation, Render Scale down to 0.25 (**Ultra Potato Mode 🥔**), the Mac app, **Mods** (import a .zip or folder, each with a switch and an order; [how](docs/playing.md#mods)), and freeze reports in `log.txt`.
 
 ## Features
 
@@ -55,9 +68,9 @@ L7 moves the port onto the newest nxnative engine and aims at one thing: **stabl
 | 🎞️ **Frame generation** | 30 frames drawn, 60 shown, with MetalFX's frame interpolator |
 | 🔍 **MetalFX upscaling** | In place of the game's own upscaler, which cost a phone 5–10 ms a frame |
 | 📱 **Wide view** | Fills the iPhone's screen at its own shape, nothing stretched |
-| 🎵 **Ocarina with your microphone** | Hum or whistle the notes into your iPhone's or Mac's microphone to play the ocarina |
+| 🎵 **Ocarina with your microphone** | Hum or whistle the notes into your iPhone's or Mac's microphone; a sensitivity slider and a mic tester in the launcher |
 | 🛡️ **Amiibo** | From a list, a real figure over NFC, or Shortcuts |
-| 🧩 **Mods** | Import romfs mods as a .zip or folder, switch them on and off, set their order |
+| 🧩 **Mods** | Import romfs mods as a .zip or folder, switch them on and off, set their order; modded Link models always show |
 | 🧠 **Texture Memory Saver** | Keeps the app under 5 GB, on by default on iPhone |
 | 🥔 **Ultra Potato Mode** | Render Scale down to 0.25 for older phones |
 | 💻 **Mac app** | The same launcher, made for the Mac |
@@ -181,11 +194,11 @@ Start with a cool phone: when iOS reports the phone as hot, it halves the CPU's 
 
 - In heavy areas the iPhone's GPU is near its limit at 30 fps; with frame generation on, some frames drop there.
 - Long sessions heat the phone, and iOS lowers its clocks.
-- **Being fixed:** a member's game froze at a change between areas (L7.4). L7.5 logs where such a freeze sits: if it happens to you, wait 10 seconds, then send `log.txt`.
+- **Being watched:** a member's game froze at a change between areas (L7.4). L8 takes in nxnative's residency fixes in that area; if a freeze happens to you, wait 10 seconds, then send `log.txt`.
+- **With a mod on, the first 20–25 seconds ignore input** on purpose (see Latest), so a modded Link always shows.
+- Very long sessions that visit many areas can still bring the app near 5 GB; L8.1's memory pressure mode is new, and logs of long sessions help tune it.
 - The first area after starting can freeze for up to half a second while its textures load.
-- Area loads can take a frame of 300–700 ms.
 - If the picture ever stops for 5 seconds, a watchdog writes the game's threads to `log.txt`: send that log.
-- **Mods:** on one iPhone a modded character's body stayed invisible while the phone's pipeline cache was from an older build; it showed once that cache was rebuilt. If part of a modded model is invisible, delete the `pso_archive` folder in the game's Documents folder and start twice (the first start rebuilds it, a few minutes on the preparing screen). The cause is not known yet: send `log.txt` if it happens.
 
 ## Credits
 
@@ -195,6 +208,8 @@ Start with a cool phone: when iOS reports the phone as hot, it halves the CPU's 
 - **vladbondarenko97**: Wide view, first as nxnative PR #1460.
 - **Puca**: the movie player's pictures per frame (nxnative PR #2456).
 - **AmateurWizrd**: mesh stage memory (nxnative PR #2308).
+- **dpadr**: no more write-fault loops on pages the game writes all the time (nxnative PR #3180, in L8).
+- **seedds and the nxnative contributors** of the upstream fixes in L8 (PRs #1696, #2714, #2720, #2868, #2870, #3060, #3065).
 - **Xipzer**: guest thread wakes (nxnative PR #1466).
 - **Pedro Nascimento (lunks)**, **Oliver Ames**, **nanotchec**, **Adrian Smith**, **Romen Adama Caetano Ramírez**, **Travis (travislikestocode)**, **David Lepe**, **uncraftablexd**, **mmkzer0**, **Nimesh Ambepitiya**, **MetaIX**, **TheGoldfish11**, **David Padron-Harris**, **zatteogit**, **tut**, **bettterlabs**, the author of the oot2 branch, and a contributor who signed only as "contributor".
 
