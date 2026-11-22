@@ -8,6 +8,7 @@
 #pragma once
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum {
@@ -30,8 +31,21 @@ typedef struct {
     float loudest_db; uint32_t blocks, boosted;   // since the last mic_level_take_stats
 } mic_level;
 
-// DM_MIC_BOOST, the launcher's Mic Sensitivity: off (the samples as captured, as before the leveler), normal (the default) or high. NULL for another value (the caller says so; normal)
+// The launcher's Mic Sensitivity slider (kid-with-sword-remake L8): a number from 0 to 1 ("0.60"). 0 is off; the most a block is raised grows 40 dB across the slider and the margin
+// a sound must stand over the background narrows from 20 dB (6.7 dB at 1), so 0.6 and 0.9 are the old normal (24 dB, 12 dB) and high (36 dB, 8 dB). Rounded to 0.1 dB. 0 when v is no number
+static inline int mic_level_slider(const char *v, float *boost_db, float *margin_db) {
+    if (!v || !*v) return 0;
+    char *end; float x = strtof(v, &end);
+    if (end == v || *end || !(x == x)) return 0;
+    if (x < 0) x = 0; if (x > 1) x = 1;
+    *boost_db = roundf(400.0f * x) / 10.0f;
+    *margin_db = roundf(10.0f * (20.0f - x * 40.0f / 3.0f)) / 10.0f;
+    return 1;
+}
+// DM_MIC_BOOST, the launcher's Mic Sensitivity: the slider's number (above), or the earlier choices off (the samples as captured, as before the leveler), normal (the default) or high.
+// NULL for another value (the caller says so; normal)
 static inline const char *mic_level_preset(const char *v, float *boost_db, float *margin_db) {
+    if (mic_level_slider(v, boost_db, margin_db)) return *boost_db > 0 ? "slider" : "off";
     if (v && !strcmp(v, "off")) { *boost_db = 0; *margin_db = 0; return "off"; }
     if (v && !strcmp(v, "high")) { *boost_db = 36; *margin_db = 8; return "high"; }
     *boost_db = 24; *margin_db = 12;

@@ -307,6 +307,7 @@ struct AllSettingsDrawer: View {
     let backgroundChanged: () -> Void
     let memory: Int
     @State private var tab = ""
+    @State private var testingMic = false
     private var tabs: [String] { m.sections.filter { !m.rows(in: $0).isEmpty } + ["Saves", "Look"] }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -329,6 +330,12 @@ struct AllSettingsDrawer: View {
                     LookSection(changed: backgroundChanged).listRowBackground(LauncherTheme.row)
                 default:
                     Section { ForEach(m.rows(in: current)) { SettingRow(s: $0, m: m) } }.listRowBackground(LauncherTheme.row)
+                    if m.rows(in: current).contains(where: { $0.env == "DM_MIC" || $0.env == "DM_MIC_BOOST" }) {   // MicTester.swift
+                        Section {
+                            Button("Test Microphone") { testingMic = true }.foregroundStyle(LauncherTheme.paleGold)
+                        } footer: { Text("Hum or whistle and see whether the game would hear a note, and which one.") }
+                        .listRowBackground(LauncherTheme.row)
+                    }
                     if current == "Performance" && memory > 0 {
                         Section {
                             HStack { Text("Memory Available"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary) }
@@ -347,6 +354,7 @@ struct AllSettingsDrawer: View {
             .contentMargins(.horizontal, 0, for: .scrollContent)
             .contentMargins(.top, 2, for: .scrollContent)
             .tint(LauncherTheme.gold)
+            .sheet(isPresented: $testingMic) { MicTesterView(m: m) }
         }
         .padding(14)
         .background(LauncherTheme.panel)

@@ -115,6 +115,14 @@ int main(void) {
         CHECK("high", !strcmp(mic_level_preset("high", &b, &g), "high") && b == 36 && g == 8);
         CHECK("off boosts nothing", !strcmp(mic_level_preset("off", &b, &g), "off") && b == 0);
         CHECK("another value is reported, and normal", mic_level_preset("loud", &b, &g) == NULL && b == 24);
+        CHECK("the slider at 0.60 is normal's boost and margin", !strcmp(mic_level_preset("0.60", &b, &g), "slider") && b == 24 && g == 12);
+        CHECK("the slider at 0.90 is high's", !strcmp(mic_level_preset("0.90", &b, &g), "slider") && b == 36 && g == 8);
+        CHECK("the slider at 0 is off", !strcmp(mic_level_preset("0.00", &b, &g), "off") && b == 0);
+        CHECK("the slider at 1 boosts most and needs the least margin", !strcmp(mic_level_preset("1.00", &b, &g), "slider") && b == 40 && g > 6.6f && g < 6.8f);
+        CHECK("a slider value past 1 is held at 1", !strcmp(mic_level_preset("3", &b, &g), "slider") && b == 40);
+        CHECK("a number with trailing text is no slider value", mic_level_preset("0.5x", &b, &g) == NULL && b == 24);
+        { float lo_b, lo_g, hi_b, hi_g; mic_level_preset("0.30", &lo_b, &lo_g); mic_level_preset("0.70", &hi_b, &hi_g);
+          CHECK("a higher slider boosts more and needs less margin", hi_b > lo_b && hi_g < lo_g); }
     }
     printf("t_mic_level: %d checks, %d failed\n", checks, failed);
     return failed != 0;

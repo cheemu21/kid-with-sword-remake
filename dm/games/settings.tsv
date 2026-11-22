@@ -29,7 +29,7 @@ DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-Rate Counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch Feedback
 DM_MIC	toggle	-	0	always	Controls	Microphone	Lets a game that listens hear you, such as playing the ocarina by humming or whistling the notes. The system asks for the microphone once; on iPhone the game's sound then plays through an audio session that also records. Recommended: on to play the ocarina by voice.
-DM_MIC_BOOST	choice	normal=Normal,high=High,off=Off	normal	always	Controls	Mic Sensitivity	Raises quiet humming and whistling that stand out from the room. High also hears quieter notes, and more of the room and the game's own sound; Off gives the game the microphone as it is.	needs=DM_MIC=1
+DM_MIC_BOOST	range	0:1:0.05	0.6	always	Controls	Mic Sensitivity	How much quiet humming and whistling is raised so the game hears it as a note. Higher hears quieter notes from farther away, but also more of the room and the game's own sound; 0 % gives the game the microphone as it is. 60 % is the earlier Normal, 90 % High. Test Microphone below shows what the game hears.	needs=DM_MIC=1
 DM_PAD_THEME	choice	0=Classic,1=Forest	DM_GAME_PAD_THEME	platform:ios	Controls	Touch Controls Style	The colours of the on-screen controls.
 DM_RUMBLE	toggle	-	1	always	Controls	Game Rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble Strength		needs=DM_RUMBLE=1
