@@ -68,6 +68,29 @@ void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t 
 }
 static int32_t pick(int32_t a, int32_t b);
 static int32_t ax(uint64_t v, int i);
+// kid-with-sword-remake L8: with mods on, the game reads no input until a profile's frame count (mod_input_hold; Ocarina of Time 660; DM_MOD_INPUT_HOLD overrides): its modded
+// Link piece set up before about frame 600 is never drawn, and a save loaded only after the hold sets it up later. The frames left (0 when none: no mods, no hold, or the hold
+// over); the iOS front end shows them (front_ios.m). The frame count is the presented frames (hle_nvn.c dm_nvn_frame_count); a host without the NVN layer has no hold
+#ifndef DM_GAME_MOD_INPUT_HOLD
+#define DM_GAME_MOD_INPUT_HOLD 0
+#endif
+#ifndef DM_HOLD_MODS   // t_hid defines both, to drive the hold
+__attribute__((weak)) int dm_mods_active(void) { return 0; }   // hle_fs.c: mods served, -1 before the first rom mount worked them out
+__attribute__((weak)) uint64_t dm_nvn_frame_count(void) { return UINT64_MAX; }
+#define DM_HOLD_MODS() dm_mods_active()
+#define DM_HOLD_FRAME() dm_nvn_frame_count()
+#endif
+static long g_sh_frames = -2; static _Atomic int g_sh_done, g_sh_logged;
+long dm_input_startup_hold_left(void) {
+    if (atomic_load_explicit(&g_sh_done, memory_order_relaxed)) return 0;
+    if (g_sh_frames == -2) { const char *e = getenv("DM_MOD_INPUT_HOLD"); g_sh_frames = e && *e ? atol(e) : DM_GAME_MOD_INPUT_HOLD; }
+    long n = g_sh_frames; int mods = DM_HOLD_MODS();
+    if (n <= 0 || mods == 0) { atomic_store(&g_sh_done, 1); return 0; }
+    uint64_t f = DM_HOLD_FRAME();
+    if (f >= (uint64_t)n) { if (!atomic_exchange(&g_sh_done, 1)) LOG("input: the hold after start ends at frame %llu", (unsigned long long)f); return 0; }
+    if (!atomic_exchange(&g_sh_logged, 1)) LOG("input: held until frame %ld after start, with mods on (mod_input_hold; DM_MOD_INPUT_HOLD)", n);
+    return (long)(n - (long)f);
+}
 void dm_input_hold(int on) {
     if (atomic_exchange(&g_hold, on) == on) return;
     atomic_store(&g_latch, 0); atomic_store(&g_sc_latch, 0); for (int p = 0; p < DM_PLAYERS; p++) atomic_store(&g_pad_latch[p], 0);   // a press made for the applet is not the game's
@@ -584,6 +607,7 @@ static void fill_joy(NpadState *s, npad_ref r) {
         b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
         uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
     }
+    if (atomic_load(&g_hold) || dm_input_startup_hold_left() > 0) { b = 0; memset(a, 0, sizeof a); }   // as fill
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     s->buttons = (b & 0x0f00ffffull) | stick_dirs(a);
     s->attributes = ATTR_CONNECTED | (left ? ATTR_LEFT_CONN : 0) | (right ? ATTR_RIGHT_CONN : 0);
@@ -612,7 +636,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         b |= atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
-    if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
+    if (atomic_load(&g_hold) || dm_input_startup_hold_left() > 0) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front, or the hold after start: the game reads nothing (the latches were taken all the same)
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;

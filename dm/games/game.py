@@ -194,6 +194,8 @@ def header_one(g):
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
     if pl not in ('simple', 'full', 'touch', 'native'): sys.exit(f'{g.id}: pad_layout must be simple, full, touch or native: {pl}')   # touch = Tap (no control: every touch goes to the game's touch screen); native = a mobile-game layout in glass (a floating left stick, the camera on the right half, icon keys with the button's letter)
+    mih = g.get('mod_input_hold', '0')   # frames after start during which the game reads no input while mods are on (hle_hid.c dm_input_startup_hold_left; DM_MOD_INPUT_HOLD overrides): 0 = none
+    if not mih.isdigit() or int(mih) > 100000: sys.exit(f'{g.id}: mod_input_hold must be a frame count (0 = none): {mih}')
     amo = g.get('amiibo_overlay', 'off')   # the amiibo overlay (DM_AMIIBO picker list; hle_fs.c rom_overlay_set loads amiibo-nolimit/ always): on when the app's romfs_overlay has the amiibo-* folders (scripts/oot_amiibo_overlay.py)
     if amo not in ('off', 'on'): sys.exit(f'{g.id}: amiibo_overlay must be off or on: {amo}')
     pth = g.get('pad_theme', 'classic')   # the virtual gamepad's colours (DmGamepad.m theme_init; the launcher's Touch controls style, DM_PAD_THEME, overrides): classic = translucent white, forest = the N64-and-woods palette
@@ -273,6 +275,7 @@ def header_one(g):
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch", "native").index(pl)}',
          f'#define DM_GAME_PAD_THEME {("classic", "forest").index(pth)}',
          f'#define DM_GAME_AMIIBO_OVERLAY {int(amo == "on")}',
+         f'#define DM_GAME_MOD_INPUT_HOLD {int(mih)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',

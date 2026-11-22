@@ -8,6 +8,7 @@
 // +0x10 x, +0x14 y, +0x18 diameter x, +0x1c diameter y, +0x20 rotation angle, +0x24 reserved. TouchScreenState<16>: +0 sample number, +8 touch count, 16 TouchState from +0x10.
 #include "dm.h"
 #include "front.h"
+__attribute__((weak)) long dm_input_startup_hold_left(void) { return 0; }   // hle_hid.c (dm_input.h): the hold after start with mods on; none where it is not linked (t_touch)
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -52,6 +53,7 @@ static int32_t clampi(float v, int hi) { int32_t r = (int32_t)(v * (float)(hi + 
 // has no touch points and the fingers are left as they are, but it takes the next sample number, so the numbers rise from sample to sample whatever the mode. Unity's
 // touch reader (Aokana main+0xd2bde0) takes a state only if its number is above the last one it took, empty states included
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points) {
+    if (dm_input_startup_hold_left() > 0) points = 0;   // the hold after start (hle_hid.c): no touch points either
     if (max < 1) max = 1; else if (max > 16) max = 16;
     uint8_t *o = out; memset(o, 0, 0x10 + 0x28 * (size_t)max);
     pthread_mutex_lock(&g_tl);

@@ -185,6 +185,8 @@ static void rom_overlay_expand(const char *env, char *dst, size_t n) {
 }
 // The rom mount's overlay folders: DM_ROMFS_OVERLAY (the app's own replacements), with the player's enabled mods (DM_MODS) and their merged size table over it (mods.h).
 // Without DM_MODS it is DM_ROMFS_OVERLAY itself, as it always was. With it, the list is worked out at the first rom mount and again only when either variable changes. NULL: no overlay
+static _Atomic int g_mods_served = -1;   // the player's mods with files served (-1: DM_MODS set but not worked out yet, at the first rom mount)
+int dm_mods_active(void) { const char *m = getenv("DM_MODS"); return m && *m ? atomic_load(&g_mods_served) : 0; }   // hle_hid.c dm_input_startup_hold_left
 static const char *rom_overlay_env(void) {
     const char *bundled = getenv("DM_ROMFS_OVERLAY"), *mods = getenv("DM_MODS");
     if (!mods || !*mods) return bundled;
@@ -200,6 +202,7 @@ static const char *rom_overlay_env(void) {
             LOG("fs mod %d: %s: %d files%s, %d bigger than the originals, %d size table entries raised%s%s%s%s", i + 1, r, st[i].files, st[i].shadowed ? " (some under a mod above)" : "", st[i].bigger, st[i].raised,
                 st[i].untracked ? " [RED] some bigger files have no size table room" : "", st[i].own_table ? ", its own size table not served" : "", st[i].dropped ? " [RED] not served" : "", st[i].no_table && st[i].bigger ? " (no size table in this app)" : "");
         free(all);
+        { int served = 0; for (int j = 0; j < i && j < MODS_MAX; j++) served += st[j].files > 0 && !st[j].dropped; atomic_store(&g_mods_served, served); }
         LOG("fs rom overlay with %d mod%s: %s", n, n == 1 ? "" : "s", list);
     }
     pthread_mutex_unlock(&lock);

@@ -1,5 +1,6 @@
 // Players and controllers (GitHub issue #74): the Mac front end's slot assignment (pad_slots.h) and the npads hle_hid.c reports for each player, docked and handheld, with the
 // game's supported npad ids; no controller, window or guest exists in this test (the hid take-overs are called directly, events are recorded by the stubs)
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
 #include <sched.h>
@@ -7,6 +8,9 @@ static int hid_clock_gettime(clockid_t clock, struct timespec *ts);
 static int hid_usleep(useconds_t usec);
 #define clock_gettime hid_clock_gettime
 #define usleep hid_usleep
+static int t_hold_mods; static uint64_t t_hold_frame = UINT64_MAX;   // the hold after start (dm_input_startup_hold_left): the test's mod count and frame
+#define DM_HOLD_MODS() t_hold_mods
+#define DM_HOLD_FRAME() t_hold_frame
 #include "../hle_hid.c"
 #undef clock_gettime
 #undef usleep
@@ -1664,12 +1668,37 @@ static void t_unsupported_style(void) {
     h_hid_SetStyles(0xffffffffu); pthread_mutex_lock(&g_style_lock); g_style_ev[0] = NULL; pthread_mutex_unlock(&g_style_lock);
 }
 
+// The hold after start (kid-with-sword-remake L8): with mods on, the game reads no buttons or sticks until the profile's frame count (DM_MOD_INPUT_HOLD here); without
+// mods, or once that frame is reached, input passes; a hold that ended does not come back
+static void hold_reset(void) { g_sh_frames = -2; atomic_store(&g_sh_done, 0); atomic_store(&g_sh_logged, 0); }
+static void t_startup_hold(void) {
+    g_mode = 1; dm_pad_players(0);
+    setenv("DM_MOD_INPUT_HOLD", "100", 1); hold_reset(); t_hold_mods = 1; t_hold_frame = 40;
+    dm_input_set(DM_BTN_A, 300, 0, 0, 0);
+    CHECK(dm_input_startup_hold_left() == 60, "with a mod on, 60 of the 100 frames are left at frame 40");
+    CHECK(buttons_of(0, STYLE_FULLKEY) == 0 && lx_of(0) == 0, "while held, the game reads no button and no stick");
+    t_hold_mods = -1;
+    CHECK(dm_input_startup_hold_left() > 0, "mods not worked out yet (DM_MODS set, no rom mount): held");
+    t_hold_mods = 1; t_hold_frame = 100;
+    CHECK(dm_input_startup_hold_left() == 0 && buttons_of(0, STYLE_FULLKEY) == DM_BTN_A && lx_of(0) == 300, "at the hold's frame, input passes");
+    t_hold_frame = 10;
+    CHECK(dm_input_startup_hold_left() == 0, "a hold that ended does not come back");
+    hold_reset(); t_hold_mods = 0; t_hold_frame = 10;
+    CHECK(dm_input_startup_hold_left() == 0 && buttons_of(0, STYLE_FULLKEY) == DM_BTN_A, "without mods there is no hold");
+    setenv("DM_MOD_INPUT_HOLD", "0", 1); hold_reset(); t_hold_mods = 1;
+    CHECK(dm_input_startup_hold_left() == 0, "DM_MOD_INPUT_HOLD=0 turns it off");
+    unsetenv("DM_MOD_INPUT_HOLD"); hold_reset(); t_hold_mods = 1;
+    CHECK(dm_input_startup_hold_left() == (DM_GAME_MOD_INPUT_HOLD > 10 ? DM_GAME_MOD_INPUT_HOLD - 10 : 0), "without the variable, the profile's mod_input_hold");
+    hold_reset(); t_hold_mods = 0; t_hold_frame = UINT64_MAX;
+    dm_input_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
+}
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     setenv("DM_IMU_DELAY", "0", 1);   // the tests of the live history read it at the present; t_live_delay checks the playout delay
     // The plumbing tests (streams, interpolation, dither, pairs) were written with the samples negated: they keep that (DM_IMU_*_SIGN=-1); t_npad_imu_samples and
     // t_imu_conversion check the host's own signs
     setenv("DM_IMU_ACC_SIGN", "-1", 1); setenv("DM_IMU_GYRO_SIGN", "-1", 1);
+    t_startup_hold();
     t_npad_imu();
     t_icon_decoration();
     t_slots();

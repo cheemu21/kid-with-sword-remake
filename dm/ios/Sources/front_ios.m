@@ -53,6 +53,7 @@ static void front_ios_power_watch(void);
 static void screen_refresh(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
+static void front_ios_hold_banner(UIView *root);
 
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
@@ -209,6 +210,7 @@ static void launcher_done(void) { [g_root startGame]; }
     UIApplication.sharedApplication.idleTimerDisabled = YES;
     tv_attach();   // a TV connected while the launcher showed
     front_ios_boot();
+    front_ios_hold_banner(self.view);
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
@@ -372,6 +374,27 @@ static UILabel *front_ios_fps_label(void) {
     return l;
 }
 
+// kid-with-sword-remake L8: the hold after start with mods on (hle_hid.c dm_input_startup_hold_left, the profile's mod_input_hold): the game reads no input for its first
+// frames, so a banner over the title says so and counts down (at the game's 30 fps; the frames are what count). Removed once the hold ends, or at once without mods
+long dm_input_startup_hold_left(void);
+static void front_ios_hold_banner(UIView *root) {
+    if (!root || dm_input_startup_hold_left() <= 0) return;
+    UILabel *l = [UILabel new];
+    l.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
+    l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55]; l.layer.cornerRadius = 10; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
+    CGFloat w = 300, top = root.safeAreaInsets.top + 12;
+    l.frame = CGRectMake(floor((root.bounds.size.width - w) / 2), top, w, 34);
+    l.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleBottomMargin;
+    l.text = @"Getting your mods ready…";
+    [root addSubview:l];
+    LOG("front end: input held after start with mods on, banner shown");
+    [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
+        long left = dm_input_startup_hold_left();
+        if (left <= 0) { [t invalidate]; [UIView animateWithDuration:0.3 animations:^{ l.alpha = 0; } completion:^(BOOL done) { (void)done; [l removeFromSuperview]; }]; return; }
+        [l.superview bringSubviewToFront:l];
+        l.text = [NSString stringWithFormat:@"Getting your mods ready… %ld s", (left + 29) / 30];
+    }];
+}
 // Progress screen of the prepare step (front.h front_progress): a dark view over the game's view and the pad, the title, a bar and a count, centered; UIKit views, so it draws while the game's thread waits
 static UIView *g_prog; static UILabel *g_prog_count; static UIProgressView *g_prog_bar; static UILabel *g_prog_title;
 void (*front_progress_hook)(const char *title, long done, long total);

@@ -88,3 +88,7 @@ amiibo_overlay	on
 # output's height times the scale (a Mac run and the owner's iPhone logs at 0.6: handheld 1169x658 for 1920x1080, Wide view's 1432x658 for 2352x1080, docked 1909x877 for 3136x1440)
 # and its width from that height and the output's shape (LauncherSettings.swift rangeLabel takes Wide view's shape from the screen)
 render_base	2599x1462 1949x1097
+# kid-with-sword-remake L8: with a mod on, the game reads no input for the first 660 presented frames (about 20-25 s from start; a "Getting ready" banner on iPhone). A mod's
+# piece of Link set up before about frame 600 is never drawn that session (the Goku mod, 23 launches: every setup at frame 589 or earlier invisible, at 680 or later drawn; the
+# game's reason not found), and a save cannot be loaded before the hold ends, so the setup lands after it. Without mods there is no hold. DM_MOD_INPUT_HOLD=<frames> overrides
+mod_input_hold	660

@@ -55,6 +55,7 @@ uint32_t dm_player_npad(int player);  // the npad id the game reads player p + 1
 // out of focus does, and presses made meanwhile are dropped when the hold ends. dm_input_peek reads what the applet sees: every path ORed (any controller drives it), each stick
 // axis the most deflected one, plus the presses since the last peek (a tap between two peeks is reported once). Any thread
 void dm_input_hold(int on);
+long dm_input_startup_hold_left(void);   // hle_hid.c: frames of the hold after start left (mods on, the profile's mod_input_hold); 0 when none
 void dm_input_peek(uint64_t *buttons, int32_t axes[4]);
 
 // Optional diagnostic DM_HID_RECEIPT_LOG=<writable JSONL path>: received samples of real GetNpadState returns.
