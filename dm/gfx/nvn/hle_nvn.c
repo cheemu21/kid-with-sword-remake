@@ -1293,7 +1293,10 @@ static int vl_unit_dump(uint64_t u, const char *why, unsigned long long frame) {
 // drawn, the structure 0x1bb0 below its unit holds a quiet NaN (0x7fc00000) at +0 (test 19/20). DM_NVN_NANFIX=<value> (test) writes that value there while it holds that NaN
 enum { VL_UNITS = 4, VL_REFS = 8 };
 static struct { uint64_t u, ref[VL_REFS]; int nref; } g_vl_unit[VL_UNITS]; static int g_vl_nunit = -1;   // -1: not scanned yet
-static uint64_t g_vl_lo = 0x7000000000ull, g_vl_hi = 0x7800000000ull; static unsigned g_vl_scan_delay = 300;   // the guest range and the wait before the scan (unit tests change them)
+// The wait is 120 frames: the game draws the piece (or not) from about 80 frames after it records it, when the world appears, and the owner's test runs end 180-280 frames
+// after that recording (300 missed both launches of test 21); DM_NVN_VISLOG_DELAY=<frames> changes it
+static uint64_t g_vl_lo = 0x7000000000ull, g_vl_hi = 0x7800000000ull; static int g_vl_scan_delay = -1;   // the guest range and the wait before the scan (unit tests change them)
+static unsigned vl_scan_delay(void) { if (g_vl_scan_delay < 0) { const char *e = getenv("DM_NVN_VISLOG_DELAY"); g_vl_scan_delay = e && *e ? atoi(e) : 120; if (g_vl_scan_delay < 0) g_vl_scan_delay = 0; } return (unsigned)g_vl_scan_delay; }
 static unsigned long long g_vl_last_scan; static _Atomic unsigned g_vl_nanfix_logs;
 static int vl_nanfix(float *v) {
     static int on = -1; static float val;
@@ -1315,7 +1318,7 @@ int dm_vislog_units_dump(const char *why, unsigned long long frame) {   // retur
     if (vislog_want() <= 0) return 0;
     pthread_mutex_lock(&g_vl_mu); uint64_t obj = g_vl_nent ? g_vl_ent[0].obj : 0, f0 = g_vl_ent_frame; pthread_mutex_unlock(&g_vl_mu);
     if (!obj) return 0;
-    if ((g_vl_nunit < 0 || (g_vl_nunit == 0 && frame - g_vl_last_scan >= 900)) && why[0] != 's' && frame >= f0 + g_vl_scan_delay) {
+    if ((g_vl_nunit < 0 || (g_vl_nunit == 0 && frame - g_vl_last_scan >= 900)) && why[0] != 's' && frame >= f0 + vl_scan_delay()) {
         uint64_t all[64], t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); int na = vl_scan_all(obj, g_vl_lo, g_vl_hi, all, 64); g_vl_nunit = 0; g_vl_last_scan = frame;
         for (int i = 0; i < na && g_vl_nunit < VL_UNITS; i++) {
             if (all[i] < 0x68 || vl_unit_dump(all[i] - 0x68, why, frame) < 0) continue;

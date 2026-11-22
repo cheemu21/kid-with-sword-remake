@@ -121,6 +121,10 @@ int main(void) {
     for (int i = 0; i < nh; i++) if (hits[i] == (uint64_t)(uintptr_t)&elem[2]) found = 1;
     CHECK("the scan finds the element's pointer to the unit", found);
     CHECK("an unmapped range is skipped, not read", vl_scan_refs(1, 0x1000, 0x200000, hits, 16) == 0);
+    setenv("DM_NVN_VISLOG_DELAY", "40", 1); g_vl_scan_delay = -1;
+    CHECK("DM_NVN_VISLOG_DELAY sets the wait before the scan", vl_scan_delay() == 40);
+    unsetenv("DM_NVN_VISLOG_DELAY"); g_vl_scan_delay = -1;
+    CHECK("the wait is 120 frames by default", vl_scan_delay() == 120);
     g_vl_lo = (uint64_t)(uintptr_t)objmem - (8u << 20); g_vl_hi = (uint64_t)(uintptr_t)objmem + (8u << 20); g_vl_scan_delay = 0;   // the scan over this test's memory, at once
     CHECK("a suspend does not scan", dm_vislog_units_dump("suspend at", 0) == 0 && g_vl_nunit < 0);
     CHECK("the scan keeps the draw unit", dm_vislog_units_dump("test at", 0) >= 1);
