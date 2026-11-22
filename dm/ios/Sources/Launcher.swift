@@ -155,6 +155,9 @@ private struct LauncherView: View {
                 .shadow(color: .black.opacity(0.5), radius: 8, y: 2).lineLimit(1).minimumScaleFactor(0.6)
             Text(([statusLine] + (mods.enabledCount > 0 ? ["\(mods.enabledCount) Mod\(mods.enabledCount == 1 ? "" : "s") On"] : [])).filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.footnote).foregroundStyle(LauncherTheme.soft).lineLimit(1)
+            if let w = launcherMemoryWarning(room: UInt64(memory)) {
+                Label(w, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(LauncherTheme.paleGold).lineLimit(2).padding(.top, 2)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -302,6 +305,17 @@ private struct LauncherView: View {
               let files = primary["CFBundleIconFiles"] as? [String], let last = files.last else { return nil }
         return UIImage(named: last)
     }
+}
+
+// L8.2: a line under the title when iOS would likely close the game for memory, so a player on an older iPhone knows why before it happens. Ocarina of Time's footprint was
+// 4.1-4.9 GB in play on an iPhone 18 Pro (L8.1, render scale 0.6) and iOS closes an app at its limit: the room the launcher reads (os_proc_available_memory, nearly the whole limit
+// before the game starts) under 5 GB warns. Every iPhone under 7 GB of memory (6 GB or less: the iPhone 15 and 14 Pro and older) has an A16 or older chip, with no BC texture formats,
+// where the host stops at start (nvn_mtl.m: an A17 Pro or later is needed), so it says that instead
+func launcherMemoryWarning(room: UInt64, physical: UInt64 = ProcessInfo.processInfo.physicalMemory) -> String? {
+    let gb = { (b: UInt64) in String(format: "%.1f", Double(b) / 1_073_741_824) }
+    if physical < 7 << 30 { return "This iPhone can't run the game. It needs an iPhone 15 Pro or newer (A17 Pro chip or later, 8 GB of memory)." }
+    if room > 0 && room < 5 << 30 { return "Only \(gb(room)) GB of memory is free for the game (it uses about 5 GB). Close other apps first, or iOS may close the game." }
+    return nil
 }
 
 // This phone's starting values and the settings it can't use (LauncherModel.deviceDefaults / unavailable), before the model reads them.

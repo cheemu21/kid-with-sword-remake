@@ -7,6 +7,8 @@
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <sys/clonefile.h>
+#include <malloc/malloc.h>   // malloc_zone_pressure_relief (mem_level)
+#include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
 #include <mach/mach.h>
 #include <dlfcn.h>
@@ -480,34 +482,75 @@ enum { RH_CAP = 256u << 20 }; static const uint64_t RH_IDLE_NS = 3000000000ull;
 // memory (in files, DM_GUEST_FILE) out and the game read it back mid-frame (up to 101 MB in a 338 ms frame; 54 frames dropped in 300). While the footprint is at DM_NVN_MEM_HIGH_MB
 // (default 4600) or more, or the room iOS leaves the app (os_proc_available_memory) is under DM_NVN_MEM_ROOM_MB (default 3000), the host gives memory back sooner: shared render
 // targets drawn over go after 1 s unused instead of 3 (tu_pass), recycled heaps go at once (rh_trim) and pools are not made resident ahead (res_trickle). It ends 300 MB under
-// both (hysteresis). Read at most every 0.5 s (task_info, on the submit thread). DM_NVN_MEM_HIGH_MB=0 turns it off
-typedef struct { int64_t high_mb, room_mb; } mem_hot_cfg;
-static int mem_hot_next(int was, int64_t footprint_mb, int64_t room_mb, mem_hot_cfg c) {   // room_mb < 0: not known (the Mac)
-    if (c.high_mb <= 0) return 0;
-    if (was) return footprint_mb >= c.high_mb - 300 || (room_mb >= 0 && room_mb < c.room_mb + 300);
-    return footprint_mb >= c.high_mb || (room_mb >= 0 && room_mb < c.room_mb);
+// both (hysteresis). Read at most every 0.5 s (task_info, on the submit thread). DM_NVN_MEM_HIGH_MB=0 turns it off.
+// L8.2 (older phones: an 8 GB iPhone has about 2 GB less room than the 12 GB phones it was measured on): a second, critical level when the room is under DM_NVN_MEM_CRIT_MB
+// (default 1200; 0: none) or iOS itself reports critical memory pressure for the app (a dispatch memory pressure source; its warning level turns the first level on). Critical: render
+// targets go after 0.3 s unused, four times as many a pass, every waiting heap goes, and malloc gives its free pages back (malloc_zone_pressure_relief) once when it begins. iOS's
+// own reports count for 5 s and also make the next read immediate, so a warning is acted on within the frame instead of up to 0.5 s later
+typedef struct { int64_t high_mb, room_mb, crit_mb; } mem_hot_cfg;
+enum { MEM_NORMAL, MEM_HIGH, MEM_CRIT };
+// The level after `was` (MEM_*) for this footprint and room (room_mb < 0: not known, the Mac) and iOS's own report (os_level: MEM_* in the last 5 s)
+static int mem_level_next(int was, int64_t footprint_mb, int64_t room_mb, int os_level, mem_hot_cfg c) {
+    if (c.high_mb <= 0) return MEM_NORMAL;
+    int room_known = room_mb >= 0;
+    if (os_level >= MEM_CRIT) return MEM_CRIT;
+    if (c.crit_mb > 0 && room_known && room_mb < c.crit_mb + (was == MEM_CRIT ? 300 : 0)) return MEM_CRIT;
+    if (os_level >= MEM_HIGH) return MEM_HIGH;
+    if (was >= MEM_HIGH) return footprint_mb >= c.high_mb - 300 || (room_known && room_mb < c.room_mb + 300) ? MEM_HIGH : MEM_NORMAL;
+    return footprint_mb >= c.high_mb || (room_known && room_mb < c.room_mb) ? MEM_HIGH : MEM_NORMAL;
 }
+static int mem_hot_next(int was, int64_t footprint_mb, int64_t room_mb, mem_hot_cfg c) { return mem_level_next(was ? MEM_HIGH : MEM_NORMAL, footprint_mb, room_mb, MEM_NORMAL, c) != MEM_NORMAL; }
 static _Atomic uint64_t g_cur_frame;   // the presented frame (declared again below)
-static _Atomic int g_mem_hot; static _Atomic uint64_t g_mem_hot_n;
-static int mem_hot(void) {
-    static uint64_t at; static mem_hot_cfg cfg = {-1, 0};
+static _Atomic int g_mem_hot, g_mem_recheck; static _Atomic uint64_t g_mem_hot_n, g_mem_os_high_at, g_mem_os_crit_at, g_mem_os_events;
+static const uint64_t MEM_OS_HOLD_NS = 5000000000ull;
+// iOS's memory pressure reports for this app, on a utility queue: only stamps the time, the submit thread acts on it (mem_level)
+static void mem_os_source(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_source_t s = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
+                                                     dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        if (!s) return;
+        dispatch_source_set_event_handler(s, ^{
+            unsigned long f = dispatch_source_get_data(s); uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (f & DISPATCH_MEMORYPRESSURE_CRITICAL) atomic_store(&g_mem_os_crit_at, now);
+            if (f & (DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL)) { atomic_store(&g_mem_os_high_at, now); atomic_fetch_add(&g_mem_os_events, 1); atomic_store(&g_mem_recheck, 1); }
+        });
+        dispatch_resume(s);   // kept for the life of the process
+    });
+}
+static int mem_os_level(uint64_t now) {
+    uint64_t c = atomic_load(&g_mem_os_crit_at), h = atomic_load(&g_mem_os_high_at);
+    return c && now - c < MEM_OS_HOLD_NS ? MEM_CRIT : h && now - h < MEM_OS_HOLD_NS ? MEM_HIGH : MEM_NORMAL;
+}
+static int mem_level(void) {
+    static uint64_t at; static mem_hot_cfg cfg = {-1, 0, 0};
     uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (at && now - at < 500000000ull) return atomic_load_explicit(&g_mem_hot, memory_order_relaxed);
-    at = now;
-    if (cfg.high_mb < 0) { const char *h = getenv("DM_NVN_MEM_HIGH_MB"), *r = getenv("DM_NVN_MEM_ROOM_MB"); cfg.high_mb = h && *h ? atoll(h) : 4600; cfg.room_mb = r && *r ? atoll(r) : 3000; }
+    if (at && now - at < 500000000ull && !atomic_load_explicit(&g_mem_recheck, memory_order_relaxed)) return atomic_load_explicit(&g_mem_hot, memory_order_relaxed);
+    at = now; atomic_store(&g_mem_recheck, 0);
+    if (cfg.high_mb < 0) {
+        const char *h = getenv("DM_NVN_MEM_HIGH_MB"), *r = getenv("DM_NVN_MEM_ROOM_MB"), *k = getenv("DM_NVN_MEM_CRIT_MB");
+        cfg.high_mb = h && *h ? atoll(h) : 4600; cfg.room_mb = r && *r ? atoll(r) : 3000; cfg.crit_mb = k && *k ? atoll(k) : 1200;
+        if (cfg.high_mb > 0) mem_os_source();
+    }
     task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT; int64_t fp = 0, room = -1;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) fp = (int64_t)(vi.phys_footprint >> 20);
 #if TARGET_OS_IPHONE
     room = (int64_t)(os_proc_available_memory() >> 20);
 #endif
-    int was = atomic_load(&g_mem_hot), hot = mem_hot_next(was, fp, room, cfg);
-    if (hot != was) {
-        atomic_store(&g_mem_hot, hot); uint64_t n = atomic_fetch_add(&g_mem_hot_n, 1) + 1;
-        if (n <= 40 || n % 100 == 0) MLOG("memory %s (frame %llu): footprint %lld MB, room to the limit %lld MB; %s (#%llu)", hot ? "high" : "back to normal", (unsigned long long)atomic_load(&g_cur_frame),
-                                         (long long)fp, (long long)room, hot ? "unused render targets go after 1 s, recycled heaps at once, no pools made resident ahead" : "the usual pacing again", (unsigned long long)n);
+    int os = mem_os_level(now), was = atomic_load(&g_mem_hot), lv = mem_level_next(was, fp, room, os, cfg);
+    if (lv != was) {
+        atomic_store(&g_mem_hot, lv); uint64_t n = atomic_fetch_add(&g_mem_hot_n, 1) + 1;
+        static const char *what[] = {"the usual pacing again", "unused render targets go after 1 s, recycled heaps at once, no pools made resident ahead",
+                                     "unused render targets go after 0.3 s, recycled heaps at once, malloc's free pages returned, no pools made resident ahead"};
+        if (n <= 40 || n % 100 == 0 || lv == MEM_CRIT)
+            MLOG("%smemory %s (frame %llu): footprint %lld MB, room to the limit %lld MB%s; %s (#%llu)", lv == MEM_CRIT ? "[RED] " : "",
+                 lv == MEM_CRIT ? "critical" : lv == MEM_HIGH ? "high" : "back to normal", (unsigned long long)atomic_load(&g_cur_frame), (long long)fp, (long long)room,
+                 os == MEM_CRIT ? ", iOS reports critical pressure" : os == MEM_HIGH ? ", iOS reports memory pressure" : "", what[lv], (unsigned long long)n);
+        if (lv == MEM_CRIT && was != MEM_CRIT) malloc_zone_pressure_relief(NULL, 0);
     }
-    return hot;
+    return lv;
 }
+static int mem_hot(void) { return mem_level() != MEM_NORMAL; }
 typedef struct { void *heap; uint64_t size, t; } rh_ent;   // heap: retained (CFBridgingRetain); t: when it began to wait
 static os_unfair_lock g_rh_lk = OS_UNFAIR_LOCK_INIT; static rh_ent *g_rh; static unsigned g_rh_n, g_rh_cap; static uint64_t g_rh_bytes;
 static _Atomic uint64_t g_rh_made, g_rh_reused, g_rh_trimmed;   // for the memory readout
@@ -718,6 +761,8 @@ static void res_top_once(NSError *err) {
     if (!err || !strstr(err.description.UTF8String, "OutOfMemory")) return;
     static _Atomic int done, fails; static _Atomic uint64_t since;
     if (!atomic_exchange(&done, 1)) res_top("[RED] GPU out of memory");
+    // L8.2: each failure counts as iOS's critical report (mem_level): idle render targets and waiting heaps go at once, before the failures can add up to the end below
+    atomic_store(&g_mem_os_crit_at, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); atomic_store(&g_mem_recheck, 1);
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     if (now - atomic_load(&since) > 60000000000ull) { atomic_store(&since, now); atomic_store(&fails, 0); }
     if (atomic_fetch_add(&fails, 1) >= 32) MDIE("the GPU is out of memory: 32 command buffers failed within a minute (GPU allocated %llu MB, recommended working set %llu MB)", (unsigned long long)(g_dev.currentAllocatedSize >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20));
@@ -12819,7 +12864,7 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
 // the next submission starts a new epoch and every texture ID takes the slow path (ser_sync): on an iPhone 18 Pro after an area change, when about 100 targets a second went,
 // that was a 120-250 ms frame once a second (logs 42, 46, 47; none with DM_NVN_RT_DEAD=0, log 48). 32 stays under the notes with room for the ghost trim's (GHOST_TRIM), and
 // five passes a second still free up to 160
-enum { TU_IDLE = 30, TU_IDLE_HOT = 10, TU_MAX_DEF = 32, TU_EVERY_DEF = 2 };   // deciseconds (TU_IDLE_HOT: under memory pressure, mem_hot); textures a pass; deciseconds between passes
+enum { TU_IDLE = 30, TU_IDLE_HOT = 10, TU_IDLE_CRIT = 3, TU_MAX_DEF = 32, TU_EVERY_DEF = 2 };   // deciseconds (TU_IDLE_HOT / _CRIT: under memory pressure, mem_level); textures a pass; deciseconds between passes
 // DM_NVN_RT_DEAD_MAX / DM_NVN_RT_DEAD_EVERY override the two (for A/B runs: 256 and 10 are the pacing before L6.3)
 static uint32_t tu_env(const char *name, uint32_t def) { const char *e = getenv(name); int v = e && *e ? atoi(e) : 0; return v > 0 ? (uint32_t)v : def; }
 #define TU_MAX (tu_env("DM_NVN_RT_DEAD_MAX", TU_MAX_DEF))
@@ -12857,7 +12902,8 @@ static void tu_pass(void) { @autoreleasepool {
     if (!g_tu.n) return;
     uint64_t *sers = NULL; uint32_t nser = 0;
     pthread_mutex_lock(&g_smu);
-    own_dead_stats st = own_alias_dead_locked(now, mem_hot() ? TU_IDLE_HOT : TU_IDLE, tu_use_of, TU_MAX, &sers, &nser);   // 1 s under memory pressure (mem_hot)
+    int lv = mem_level();   // 1 s under memory pressure, 0.3 s and four times as many a pass when critical (mem_level)
+    own_dead_stats st = own_alias_dead_locked(now, lv == MEM_CRIT ? TU_IDLE_CRIT : lv == MEM_HIGH ? TU_IDLE_HOT : TU_IDLE, tu_use_of, lv == MEM_CRIT ? 4 * TU_MAX : TU_MAX, &sers, &nser);
     pthread_mutex_unlock(&g_smu);
     if (nser) {
         os_unfair_lock_lock(&g_rmu);
