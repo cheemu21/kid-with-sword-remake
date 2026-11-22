@@ -223,7 +223,8 @@ int main(void) { @autoreleasepool {
     depth_planes(&pool);
     cross_size_read();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
-    CHECK([g_res_objects containsObject:small],"the view parent descriptor is resident alongside its heap");
+    CHECK(placed_parent_on() ? [g_res_objects containsObject:small] : ![g_res_objects containsObject:small],   // DM_NVN_RES_PLACED_PARENT (off by default in this fork: the heap stands for it)
+          placed_parent_on() ? "the view parent descriptor is resident alongside its heap" : "the heap stands for the placed texture in the residency set");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.
     tex_t other=image(&pool,991000,64,64); other.off=10<<20; other.mem=pool.mem+other.off; mtl_tex_init(&other);
     CHECK(!objc_getAssociatedObject(tex_mtl(&other),&g_image_heap_owner_key),"single-description storage stays out of the family heaps (its memory is a recycled heap of its own, rh_texture)");

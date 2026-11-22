@@ -424,14 +424,21 @@ static void res_q_put(id<MTLAllocation> r, int add) {   // Caller holds g_res_mu
     if (g_res_qn == g_res_qcap) { g_res_qcap = g_res_qcap ? 2 * g_res_qcap : 256; g_res_q = realloc_or_die(g_res_q, g_res_qcap * sizeof *g_res_q, "the residency changes"); }
     g_res_q[g_res_qn++] = (res_op){CFBridgingRetain(r), add};
 }
+// kid-with-sword-remake L8.1: DM_NVN_RES_PLACED_PARENT=1 makes a placed texture resident beside its heap (nxnative bbacc45c, PR #1696: fragment sampling through its views under
+// Shader Validation needs the parent texture in the set). Off by default in this fork: Ocarina of Time ran without it through L7, and with it the residency set tracks every
+// placed texture as well as its heap (the L8 log: 5-7 GB added to the set every 300 frames in an area change, against about 2 GB before), so the heap alone stands for them, as before
+static int placed_parent_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_RES_PLACED_PARENT"); v = e && *e && atoi(e) > 0; if (v) MLOG("DM_NVN_RES_PLACED_PARENT=1: a placed texture is resident beside its heap"); }
+    return v;
+}
 static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepool {
     if (!allocation) return;
-    // A placed texture's heap covers storage; fragment sampling through its
-    // views also needs the parent texture descriptor. Retire both through the
-    // existing ownership and queued-residency paths, not a second heap queue.
-    if ([(id)allocation conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)allocation).heap)
-        res_add_at(((id<MTLResource>)allocation).heap, line);
-    id<MTLAllocation> r = allocation;
+    // A placed texture's heap covers storage. With DM_NVN_RES_PLACED_PARENT=1 the texture itself goes in too (fragment sampling through its views needs the parent texture
+    // descriptor), both retired through the existing ownership and queued-residency paths; otherwise the heap stands for it (its owner removes the heap after the last texture or view)
+    int placed = [(id)allocation conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)allocation).heap;
+    if (placed && placed_parent_on()) res_add_at(((id<MTLResource>)allocation).heap, line);
+    id<MTLAllocation> r = placed && !placed_parent_on() ? (id)((id<MTLResource>)allocation).heap : allocation;
     pthread_mutex_lock(&g_res_mu);
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
     if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
@@ -442,6 +449,7 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (!r) return;
+    if (!placed_parent_on() && [(id)r conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)r).heap) return;   // its heap stands for it (res_add_at)
     pthread_mutex_lock(&g_res_mu);
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
     res_q_put(r, 0);
@@ -468,6 +476,38 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
 // RH_CAP bytes waiting, leave the residency set when a submission begins (rh_trim). DM_NVN_RT_RECYCLE=0 makes each texture its own allocation and each family heap exact and freed
 // with its last texture, as before; ab alternates it with the DM_AB phases
 enum { RH_CAP = 256u << 20 }; static const uint64_t RH_IDLE_NS = 3000000000ull;
+// kid-with-sword-remake L8.1: memory pressure mode. An iPhone 18 Pro's L8 session stuttered once a new area's textures took the footprint to 5.3-5.5 GB: iOS then pushed the game's
+// memory (in files, DM_GUEST_FILE) out and the game read it back mid-frame (up to 101 MB in a 338 ms frame; 54 frames dropped in 300). While the footprint is at DM_NVN_MEM_HIGH_MB
+// (default 4600) or more, or the room iOS leaves the app (os_proc_available_memory) is under DM_NVN_MEM_ROOM_MB (default 3000), the host gives memory back sooner: shared render
+// targets drawn over go after 1 s unused instead of 3 (tu_pass), recycled heaps go at once (rh_trim) and pools are not made resident ahead (res_trickle). It ends 300 MB under
+// both (hysteresis). Read at most every 0.5 s (task_info, on the submit thread). DM_NVN_MEM_HIGH_MB=0 turns it off
+typedef struct { int64_t high_mb, room_mb; } mem_hot_cfg;
+static int mem_hot_next(int was, int64_t footprint_mb, int64_t room_mb, mem_hot_cfg c) {   // room_mb < 0: not known (the Mac)
+    if (c.high_mb <= 0) return 0;
+    if (was) return footprint_mb >= c.high_mb - 300 || (room_mb >= 0 && room_mb < c.room_mb + 300);
+    return footprint_mb >= c.high_mb || (room_mb >= 0 && room_mb < c.room_mb);
+}
+static _Atomic uint64_t g_cur_frame;   // the presented frame (declared again below)
+static _Atomic int g_mem_hot; static _Atomic uint64_t g_mem_hot_n;
+static int mem_hot(void) {
+    static uint64_t at; static mem_hot_cfg cfg = {-1, 0};
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (at && now - at < 500000000ull) return atomic_load_explicit(&g_mem_hot, memory_order_relaxed);
+    at = now;
+    if (cfg.high_mb < 0) { const char *h = getenv("DM_NVN_MEM_HIGH_MB"), *r = getenv("DM_NVN_MEM_ROOM_MB"); cfg.high_mb = h && *h ? atoll(h) : 4600; cfg.room_mb = r && *r ? atoll(r) : 3000; }
+    task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT; int64_t fp = 0, room = -1;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) fp = (int64_t)(vi.phys_footprint >> 20);
+#if TARGET_OS_IPHONE
+    room = (int64_t)(os_proc_available_memory() >> 20);
+#endif
+    int was = atomic_load(&g_mem_hot), hot = mem_hot_next(was, fp, room, cfg);
+    if (hot != was) {
+        atomic_store(&g_mem_hot, hot); uint64_t n = atomic_fetch_add(&g_mem_hot_n, 1) + 1;
+        if (n <= 40 || n % 100 == 0) MLOG("memory %s (frame %llu): footprint %lld MB, room to the limit %lld MB; %s (#%llu)", hot ? "high" : "back to normal", (unsigned long long)atomic_load(&g_cur_frame),
+                                         (long long)fp, (long long)room, hot ? "unused render targets go after 1 s, recycled heaps at once, no pools made resident ahead" : "the usual pacing again", (unsigned long long)n);
+    }
+    return hot;
+}
 typedef struct { void *heap; uint64_t size, t; } rh_ent;   // heap: retained (CFBridgingRetain); t: when it began to wait
 static os_unfair_lock g_rh_lk = OS_UNFAIR_LOCK_INIT; static rh_ent *g_rh; static unsigned g_rh_n, g_rh_cap; static uint64_t g_rh_bytes;
 static _Atomic uint64_t g_rh_made, g_rh_reused, g_rh_trimmed;   // for the memory readout
@@ -574,11 +614,12 @@ static void tu_register(id<MTLTexture> t, uint64_t serial) {
 // When a submission begins: heaps that waited RH_IDLE_NS, and the oldest past RH_CAP bytes, leave the residency set and are freed
 static void rh_trim(void) {
     if (!g_rh_n) return;
+    int hot = mem_hot();
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); void *drop[64]; unsigned nd = 0;
     os_unfair_lock_lock(&g_rh_lk);
     while (g_rh_n && nd < 64) {
         unsigned old = 0; for (unsigned i = 1; i < g_rh_n; i++) if (g_rh[i].t < g_rh[old].t) old = i;
-        if (now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= RH_CAP) break;
+        if (!hot && now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= RH_CAP) break;   // under memory pressure every waiting heap goes (mem_hot)
         drop[nd++] = g_rh[old].heap; g_rh_bytes -= g_rh[old].size; g_rh[old] = g_rh[--g_rh_n];
     }
     os_unfair_lock_unlock(&g_rh_lk);
@@ -1804,7 +1845,7 @@ static _Atomic uint64_t g_trickle_n, g_trickle_bytes;
 static void res_trickle(void) {
     static int mb = -1; static uint64_t frame = UINT64_MAX, used, gen_done;
     if (mb < 0) { const char *e = getenv("DM_NVN_RES_TRICKLE_MB"); mb = e ? atoi(e) : 16; if (mb < 0) mb = 0; if (mb > 512) mb = 512; MLOG("DM_NVN_RES_TRICKLE_MB=%d: addressed pools %s", mb, mb ? "go into the residency set a few at a time ahead of the raw memory table" : "wait for the raw memory table"); }
-    if (!mb || !g_gmem_seen) return;
+    if (!mb || !g_gmem_seen || mem_hot()) return;   // under memory pressure no pool is made resident ahead (mem_hot)
     uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); if (f != frame) { frame = f; used = 0; }
     uint64_t budget = (uint64_t)mb << 20, gen = atomic_load(&g_pool_gen);
     if (gen == gen_done || used >= budget) return;
@@ -12778,7 +12819,7 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
 // the next submission starts a new epoch and every texture ID takes the slow path (ser_sync): on an iPhone 18 Pro after an area change, when about 100 targets a second went,
 // that was a 120-250 ms frame once a second (logs 42, 46, 47; none with DM_NVN_RT_DEAD=0, log 48). 32 stays under the notes with room for the ghost trim's (GHOST_TRIM), and
 // five passes a second still free up to 160
-enum { TU_IDLE = 30, TU_MAX_DEF = 32, TU_EVERY_DEF = 2 };   // deciseconds; textures a pass; deciseconds between passes
+enum { TU_IDLE = 30, TU_IDLE_HOT = 10, TU_MAX_DEF = 32, TU_EVERY_DEF = 2 };   // deciseconds (TU_IDLE_HOT: under memory pressure, mem_hot); textures a pass; deciseconds between passes
 // DM_NVN_RT_DEAD_MAX / DM_NVN_RT_DEAD_EVERY override the two (for A/B runs: 256 and 10 are the pacing before L6.3)
 static uint32_t tu_env(const char *name, uint32_t def) { const char *e = getenv(name); int v = e && *e ? atoi(e) : 0; return v > 0 ? (uint32_t)v : def; }
 #define TU_MAX (tu_env("DM_NVN_RT_DEAD_MAX", TU_MAX_DEF))
@@ -12816,7 +12857,7 @@ static void tu_pass(void) { @autoreleasepool {
     if (!g_tu.n) return;
     uint64_t *sers = NULL; uint32_t nser = 0;
     pthread_mutex_lock(&g_smu);
-    own_dead_stats st = own_alias_dead_locked(now, TU_IDLE, tu_use_of, TU_MAX, &sers, &nser);
+    own_dead_stats st = own_alias_dead_locked(now, mem_hot() ? TU_IDLE_HOT : TU_IDLE, tu_use_of, TU_MAX, &sers, &nser);   // 1 s under memory pressure (mem_hot)
     pthread_mutex_unlock(&g_smu);
     if (nser) {
         os_unfair_lock_lock(&g_rmu);
