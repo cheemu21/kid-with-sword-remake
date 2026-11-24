@@ -330,12 +330,14 @@ struct AllSettingsDrawer: View {
                     LookSection(changed: backgroundChanged).listRowBackground(LauncherTheme.row)
                 default:
                     Section { ForEach(m.rows(in: current)) { SettingRow(s: $0, m: m) } }.listRowBackground(LauncherTheme.row)
+                    #if os(iOS)
                     if m.rows(in: current).contains(where: { $0.env == "DM_MIC" || $0.env == "DM_MIC_BOOST" }) {   // MicTester.swift
                         Section {
                             Button("Test Microphone") { testingMic = true }.foregroundStyle(LauncherTheme.paleGold)
                         } footer: { Text("Hum or whistle and see whether the game would hear a note, and which one.") }
                         .listRowBackground(LauncherTheme.row)
                     }
+                    #endif
                     if current == "Performance" && memory > 0 {
                         Section {
                             HStack { Text("Memory Available"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary) }
@@ -354,7 +356,9 @@ struct AllSettingsDrawer: View {
             .contentMargins(.horizontal, 0, for: .scrollContent)
             .contentMargins(.top, 2, for: .scrollContent)
             .tint(LauncherTheme.gold)
+            #if os(iOS)
             .sheet(isPresented: $testingMic) { MicTesterView(m: m) }
+            #endif
         }
         .padding(14)
         .background(LauncherTheme.panel)
