@@ -494,7 +494,12 @@ static int mem_hot(void) {
     uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (at && now - at < 500000000ull) return atomic_load_explicit(&g_mem_hot, memory_order_relaxed);
     at = now;
-    if (cfg.high_mb < 0) { const char *h = getenv("DM_NVN_MEM_HIGH_MB"), *r = getenv("DM_NVN_MEM_ROOM_MB"); cfg.high_mb = h && *h ? atoll(h) : 4600; cfg.room_mb = r && *r ? atoll(r) : 3000; }
+#if TARGET_OS_IPHONE
+    const int64_t def_high = 4600;
+#else
+    const int64_t def_high = 0;   // macOS: off by default (Macs routinely sit above 4.6 GB; set DM_NVN_MEM_HIGH_MB=<MB> to enable)
+#endif
+    if (cfg.high_mb < 0) { const char *h = getenv("DM_NVN_MEM_HIGH_MB"), *r = getenv("DM_NVN_MEM_ROOM_MB"); cfg.high_mb = h && *h ? atoll(h) : def_high; cfg.room_mb = r && *r ? atoll(r) : 3000; }
     task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT; int64_t fp = 0, room = -1;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) fp = (int64_t)(vi.phys_footprint >> 20);
 #if TARGET_OS_IPHONE

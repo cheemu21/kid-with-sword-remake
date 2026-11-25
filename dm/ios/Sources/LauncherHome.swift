@@ -330,12 +330,14 @@ struct AllSettingsDrawer: View {
                     LookSection(changed: backgroundChanged).listRowBackground(LauncherTheme.row)
                 default:
                     Section { ForEach(m.rows(in: current)) { SettingRow(s: $0, m: m) } }.listRowBackground(LauncherTheme.row)
+                    #if os(iOS)
                     if m.rows(in: current).contains(where: { $0.env == "DM_MIC" || $0.env == "DM_MIC_BOOST" }) {   // MicTester.swift
                         Section {
                             Button("Test Microphone") { testingMic = true }.foregroundStyle(LauncherTheme.paleGold)
                         } footer: { Text("Hum or whistle and see whether the game would hear a note, and which one.") }
                         .listRowBackground(LauncherTheme.row)
                     }
+                    #endif
                     if current == "Performance" && memory > 0 {
                         Section {
                             HStack { Text("Memory Available"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary) }
@@ -354,7 +356,7 @@ struct AllSettingsDrawer: View {
             .contentMargins(.horizontal, 0, for: .scrollContent)
             .contentMargins(.top, 2, for: .scrollContent)
             .tint(LauncherTheme.gold)
-            .sheet(isPresented: $testingMic) { MicTesterView(m: m) }
+            .micTesterSheet(isPresented: $testingMic, m: m)
         }
         .padding(14)
         .background(LauncherTheme.panel)
@@ -404,4 +406,14 @@ func launcherLastPlayed() -> String? {
     guard let d = newest else { return nil }
     let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; f.doesRelativeDateFormatting = true
     return "Last Played " + f.string(from: d)
+}
+
+private extension View {
+    @ViewBuilder func micTesterSheet(isPresented: Binding<Bool>, m: LauncherModel) -> some View {
+        #if os(iOS)
+        self.sheet(isPresented: isPresented) { MicTesterView(m: m) }
+        #else
+        self
+        #endif
+    }
 }
