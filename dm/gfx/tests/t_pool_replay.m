@@ -16,6 +16,16 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
 
+// Sampling a live buffer must hold the same lock as replacing it. Check the lock at the message send without relying on a race.
+@interface PoolStatsBuffer : NSObject
+@end
+@implementation PoolStatsBuffer
+- (NSUInteger)length {
+    os_unfair_lock_assert_owner(&g_rmu);
+    return 123;
+}
+@end
+
 enum { LEN = 1 << 20 };
 // The 2D float texture table at base 0, as a draw that reads it would ask, in the submission open now
 static id<MTLBuffer> lookup(void) {
@@ -119,6 +129,20 @@ int main(void) { @autoreleasepool {
     for (int i = 0; i < 6; i++) { TOGGLE(i & 1); table(); }
     CHECK(g_pool_spare_bytes == spare_sum() && g_pool_spare_bytes <= g_pool_spare_cap && g_npool_spare <= 2, "with a cap of two tables, two spares at most");
     g_pool_spare_cap = cap0;
+
+    uint64_t stats[POOL_STATS];
+    mtl_pool_stats(stats);
+    CHECK(stats[12] == s->buf.length && stats[13] == spare_sum(), "the stats count the live and spare table buffers separately");
+
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLBuffer> live = s->buf;
+    s->buf = (id<MTLBuffer>)[PoolStatsBuffer new];
+    os_unfair_lock_unlock(&g_rmu);
+    mtl_pool_stats(stats);
+    CHECK(stats[12] == 123, "the live table length was read under its lock");
+    os_unfair_lock_lock(&g_rmu);
+    s->buf = live;
+    os_unfair_lock_unlock(&g_rmu);
 
     printf("t_pool_replay: %d checks, %d failed\n", checks, failed);
     return failed != 0;
